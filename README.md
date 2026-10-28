@@ -74,7 +74,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 ## 相对上游的改动
 
 - **完全自托管**：所有下载地址集中在每个脚本顶部的 “Repository constants” 常量块（`REPO_OWNER`、`SCRIPT_REPO`、`SCRIPT_BRANCH`、`CORE_REPO`），改一处即可；移除 `api.v-50.me` 统计请求；首次安装的教程链接指向本仓库文档。
-- **Xboard 对接**：配置向导每添加一个节点都会实时请求 Xboard 校验面板地址 / 通讯密钥 / 节点 ID / 协议，并根据面板下发的 TLS 设置自动决定是否需要证书；新增 `V2bX check` 随时检测所有节点。修复了 sing 节点 `EnableSniff` / `EnableTFO`、`ReportMinTraffic` 等键名错误（原先被静默忽略）。详见 [docs/XBOARD.md](docs/XBOARD.md)。
+- **Xboard 对接**：配置向导每添加一个节点都会实时请求 Xboard 校验面板地址 / 通讯密钥 / 节点 ID / 协议，并根据面板下发的 TLS 设置自动决定是否需要证书；新增 `V2bX check` 随时检测所有节点。修复了 sing 节点 `EnableTFO`、`ReportMinTraffic` 等键名错误（原先被静默忽略）；`sing_origin.json` 加入 sniff 动作，使屏蔽 BT 等按协议匹配的规则真正生效（V2bX 的 sing 内核不使用 `EnableSniff`，嗅探只由该文件的路由规则决定）。详见 [docs/XBOARD.md](docs/XBOARD.md)。
 - **密钥保护**：`/etc/V2bX` 700、配置文件 600（Xboard 通讯密钥对所有节点通用）；面板地址强制 `https://`；密钥输入不回显、不出现在命令行。
 - **安装原子化**：在暂存目录中下载、校验、解压，成功后才替换现有安装；`.dgst` 缺失默认中止。
 - **systemd 沙箱**：`NoNewPrivileges`、`ProtectSystem=full`、只允许写 `/etc/V2bX` 与 `/usr/local/V2bX`、收缩能力集（`V2BX_HARDEN=0` 可关闭）。

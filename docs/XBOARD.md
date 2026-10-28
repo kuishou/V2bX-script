@@ -52,7 +52,7 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 
 | # | 问题 | 影响 | 处理 |
 | --- | --- | --- | --- |
-| F1 | sing 节点写的是 `TCPFastOpen` / `SniffEnabled`，V2bX 实际解析的键是 `EnableTFO` / `EnableSniff` | **嗅探与 TFO 实际从未开启**，基于域名的审计规则对 sing 节点无效 | **已修复** |
+| F1 | sing 节点写的是 `TCPFastOpen` / `SniffEnabled`，V2bX 实际解析的键是 `EnableTFO` / `EnableSniff`；而且 V2bX 的 sing 内核**根本不使用** `EnableSniff`，是否嗅探只由 `sing_origin.json` 的路由规则决定，原版生成的该文件里没有 sniff 动作 | TFO 开关被忽略；sing 节点从未嗅探，**按协议匹配的规则（如屏蔽 BT）从未生效**，客户端以 IP 发起的连接也匹配不到域名规则 | **已修复**：改用 `EnableTFO`；`sing_origin.json` 第一条规则为 `sniff` 动作，屏蔽改用 `reject` 动作（官方 sing-box 1.13 已删除 `block` 出站），DNS 改用新写法；不再写入无效的 `EnableSniff` |
 | F2 | 写的是 `MinReportTraffic`，实际键名是 `ReportMinTraffic` | 设置被忽略 | **已修复** |
 | F3 | 证书模式 `self` 被描述为"自签或已有证书"，而 V2bX 中 `self`=自动自签、`file`=已有证书 | 选了"已有证书"实际被覆盖为自签 | **已修复**：拆分为 http / dns / file / self 四种 |
 | F4 | dns 模式写入占位 `"EnvName": "env1"`，必然申请失败 | 需手动改配置 | **已修复**：向导直接询问服务商与凭据（Cloudflare 引导使用最小权限 API Token） |

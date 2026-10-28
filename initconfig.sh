@@ -485,7 +485,8 @@ add_node_config() {
             \"DNSType\": \"UseIPv4\","
             ;;
         sing)
-            # TFO 对 QUIC 类协议无意义
+            # TFO 对 QUIC 类协议无意义；嗅探由 sing_origin.json 的 sniff 动作控制，
+            # V2bX 的 sing 内核不使用 EnableSniff，故不再写入
             sniff_tfo=true
             case "${NodeType}" in hysteria|hysteria2|tuic|anytls) sniff_tfo=false ;; esac
             node_json+="
@@ -493,8 +494,7 @@ add_node_config() {
             \"SendIP\": \"0.0.0.0\",
             \"DeviceOnlineMinTraffic\": 200,
             \"ReportMinTraffic\": 0,
-            \"EnableTFO\": ${sniff_tfo},
-            \"EnableSniff\": true,"
+            \"EnableTFO\": ${sniff_tfo},"
             ;;
         hysteria2)
             node_json+="
@@ -621,6 +621,10 @@ write_custom_outbound_json() {
 EOF
 }
 
+# sing 内核是否嗅探只由这里的路由规则决定：V2bX 的 sing 内核不使用
+# 节点里的 EnableSniff，所以第一条必须是 sniff 动作，否则按 protocol
+# 匹配的规则（如 bittorrent）永远不会命中。
+# 屏蔽用 reject 动作：官方 sing-box 1.13 已删除 block 出站。
 write_sing_origin_json() {
     local audit="$1" dnsstrategy="ipv4_only"
     [[ "$(check_ipv6_support)" == "1" ]] && dnsstrategy="prefer_ipv4"
@@ -630,58 +634,59 @@ write_sing_origin_json() {
   "dns": {
     "servers": [
       {
+        "type": "udp",
         "tag": "cf",
-        "address": "1.1.1.1"
+        "server": "1.1.1.1"
+      },
+      {
+        "type": "udp",
+        "tag": "google",
+        "server": "8.8.8.8"
       }
     ],
     "strategy": "${dnsstrategy}"
   },
   "outbounds": [
     {
-      "tag": "direct",
       "type": "direct",
-      "domain_resolver": {
-        "server": "cf",
-        "strategy": "${dnsstrategy}"
-      }
-    },
-    {
-      "type": "block",
-      "tag": "block"
+      "tag": "direct"
     }
   ],
   "route": {
+    "default_domain_resolver": {
+      "server": "cf",
+      "strategy": "${dnsstrategy}"
+    },
     "rules": [
       {
+        "action": "sniff"
+      },
+EOF
+        # 没有 IPv6 时立即拒绝 IPv6 目标，客户端可马上回退，而不是等到超时
+        if [[ "${dnsstrategy}" == ipv4_only ]]; then
+            printf '      {\n        "ip_cidr": [\n          "::/0"\n        ],\n        "action": "reject"\n      },\n'
+        fi
+        cat <<'EOF'
+      {
         "ip_is_private": true,
-        "outbound": "block"
+        "action": "reject"
       },
       {
         "protocol": [
           "bittorrent"
         ],
-        "outbound": "block"
-      },
+        "action": "reject"
 EOF
+        printf '      }'
         if [[ "${audit}" == y ]]; then
-            printf '      {\n        "domain_regex": [\n'
+            printf ',\n      {\n        "domain_regex": [\n'
             audit_json_list "" "          "
-            printf '        ],\n        "outbound": "block"\n      },\n'
+            printf '        ],\n        "action": "reject"\n      }'
         fi
+        printf '\n'
         cat <<'EOF'
-      {
-        "outbound": "direct",
-        "network": [
-          "udp",
-          "tcp"
-        ]
-      }
-    ]
-  },
-  "experimental": {
-    "cache_file": {
-      "enabled": true
-    }
+    ],
+    "final": "direct"
   }
 }
 EOF

@@ -71,7 +71,15 @@ check "生成 3 个节点（跳过不存在的节点）" '[[ $(jq ".Nodes|length
 check "通讯密钥特殊字符原样保存" '[[ "$(jq -r ".Nodes[0].ApiKey" "${cfg}")" == "${token}" ]]'
 check "ApiHost 已规范化" '[[ "$(jq -r ".Nodes[0].ApiHost" "${cfg}")" == "http://127.0.0.1:${port}" ]]'
 check "reality 节点 CertMode=none" '[[ "$(jq -r ".Nodes[0].CertConfig.CertMode" "${cfg}")" == none ]]'
-check "sing 使用正确键名 EnableSniff/EnableTFO" '[[ "$(jq ".Nodes[0].EnableSniff" "${cfg}")" == true && "$(jq ".Nodes[0]|has(\"SniffEnabled\")" "${cfg}")" == false ]]'
+check "sing 使用正确键名 EnableTFO，不写无效的嗅探键" '[[ "$(jq ".Nodes[0]|has(\"EnableTFO\")" "${cfg}")" == true && "$(jq ".Nodes[0]|has(\"EnableSniff\") or has(\"SniffEnabled\")" "${cfg}")" == false ]]'
+# sing 内核的嗅探只由 sing_origin.json 的路由规则决定（sing 在 check 的 eval 字符串中使用）
+# shellcheck disable=SC2034
+sing="${V2BX_CONF_DIR}/sing_origin.json"
+check "sing_origin 第一条规则是 sniff 动作" '[[ "$(jq -r ".route.rules[0].action" "${sing}")" == sniff ]]'
+check "sing_origin 屏蔽 BT 用 reject" '[[ "$(jq -r "[.route.rules[]|select(.protocol==[\"bittorrent\"])][0].action" "${sing}")" == reject ]]'
+check "sing_origin 不再使用 block 出站" '! grep -q "\"block\"" "${sing}"'
+check "sing_origin DNS 使用新写法" '[[ "$(jq -r ".dns.servers[0].type" "${sing}")" == udp && "$(jq ".dns.servers[0]|has(\"address\")" "${sing}")" == false ]]'
+check "启用审计时 sing_origin 含 domain_regex reject" '[[ "$(jq -r "[.route.rules[]|select(.domain_regex)][0].action" "${sing}")" == reject ]]'
 check "使用 ReportMinTraffic 键名" '[[ "$(jq ".Nodes[0]|has(\"ReportMinTraffic\")" "${cfg}")" == true ]]'
 check "hy2 证书域名取自面板 server_name" '[[ "$(jq -r ".Nodes[1].CertConfig.CertDomain" "${cfg}")" == hy.example.com ]]'
 check "dns 模式写入 CF_DNS_API_TOKEN" '[[ "$(jq -r ".Nodes[1].CertConfig.DNSEnv.CF_DNS_API_TOKEN" "${cfg}")" == "cf\"tok\\en" ]]'
@@ -88,6 +96,7 @@ check "通讯密钥未出现在向导输出中" '! grep -qF "${token}" "${V2BX_C
 printf '%s\n' y "http://127.0.0.1:${port}" "${token}" y 2 1 2 n n | generate_config_file >/dev/null 2>&1
 check "重新生成时备份旧 config.json" 'ls "${V2BX_CONF_DIR}"/config.json.bak.* >/dev/null 2>&1'
 check "未启用审计时 route.json 无域名规则" '[[ $(jq "[.rules[]|select(.domain)]|length" "${V2BX_CONF_DIR}/route.json") -eq 0 ]]'
+check "未启用审计时 sing_origin 合法且无 domain_regex" 'jq empty "${sing}" && [[ $(jq "[.route.rules[]|select(.domain_regex)]|length" "${sing}") -eq 0 ]]'
 
 # --- 对接检测 ---
 xboard_check_config > "${V2BX_CONF_DIR}/check.out" 2>&1
