@@ -10,7 +10,12 @@
 #   * TLS certificates are always verified (insecure retry only with the
 #     explicit opt-in V2BX_INSECURE=1);
 #   * the release zip is verified against its published SHA-256 (.dgst)
-#     before it is unpacked (fails closed on mismatch);
+#     before it is unpacked (fails closed on mismatch or missing .dgst);
+#   * download + verify + unzip happen in a staging directory, the running
+#     installation is only replaced after everything succeeded;
+#   * /etc/V2bX is root-only (0700 / 0600): the Xboard server token in
+#     config.json is shared by ALL nodes of the panel;
+#   * systemd unit sandboxing (opt-out: V2BX_HARDEN=0);
 #   * more robust OS / version / package-manager / init detection.
 #
 # Supported: CentOS 7+ / RHEL / Rocky / AlmaLinux / Oracle Linux / Fedora
@@ -495,6 +500,11 @@ get_latest_version() {
     echo "${json}" | grep '"tag_name":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/'
 }
 
+# Release tag given by the user: only safe characters (it becomes part of a URL).
+valid_version() {
+    [[ "$1" =~ ^v?[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]]
+}
+
 # Print the SHA-256 of FILE (lower-case hex). Works with GNU coreutils,
 # busybox (Alpine), perl's shasum or openssl. Returns 1 if no tool exists.
 sha256_of() {
@@ -538,31 +548,72 @@ verify_zip() {
     ok "SHA-256 校验通过: ${got}"
 }
 
-# Download the release zip and its .dgst, verify, leave V2bX-linux.zip in cwd.
-# A missing .dgst (e.g. a hand-made release) only warns, unless
-# V2BX_REQUIRE_CHECKSUM=1 is set.
+# Download the release zip and its .dgst into DIR and verify it.
+# A missing .dgst aborts (our releases always publish one), unless
+# V2BX_REQUIRE_CHECKSUM=0 is set explicitly.
+# usage: download_v2bx_zip VERSION DIR
 download_v2bx_zip() {
-    local version="$1"
+    local version="$1" dir="$2"
     local url="${RELEASE_DL_BASE}/${version}/V2bX-linux-${arch}.zip"
-    local zip=/usr/local/V2bX/V2bX-linux.zip dgst=/usr/local/V2bX/V2bX-linux.zip.dgst
+    local zip="${dir}/V2bX-linux.zip" dgst="${dir}/V2bX-linux.zip.dgst"
     rm -f "${zip}" "${dgst}"
     wget_tls "${zip}" "${url}" || return 1
     if curl_tls "${dgst}" "${url}.dgst" && [[ -s "${dgst}" ]]; then
         if ! verify_zip "${zip}" "${dgst}"; then
             rm -f "${zip}" "${dgst}"
-            exit 1
+            return 2
         fi
     else
         rm -f "${dgst}"
-        if [[ "${V2BX_REQUIRE_CHECKSUM:-0}" == "1" ]]; then
-            err "未能下载校验文件 ${url}.dgst（V2BX_REQUIRE_CHECKSUM=1），已中止安装"
+        if [[ "${V2BX_REQUIRE_CHECKSUM:-1}" != "0" ]]; then
+            err "未能下载校验文件 ${url}.dgst，无法确认程序完整性，已中止安装"
+            err "（确认该 Release 本身没有 .dgst 时，可设置 V2BX_REQUIRE_CHECKSUM=0 跳过，不推荐）"
             rm -f "${zip}"
-            exit 1
+            return 2
         fi
-        warn "警告：未找到校验文件 ${url}.dgst，跳过 SHA-256 校验（仅依赖 HTTPS）"
+        warn "警告：V2BX_REQUIRE_CHECKSUM=0，跳过 SHA-256 校验（仅依赖 HTTPS）"
     fi
     rm -f "${dgst}"
     return 0
+}
+
+# Major version of systemd (0 if unknown).
+systemd_version() {
+    local v
+    v=$(systemctl --version 2>/dev/null | awk 'NR==1 {print $2}')
+    v=${v%%[!0-9]*}
+    echo "${v:-0}"
+}
+
+# Sandboxing directives for the systemd unit, depending on systemd version
+# (CentOS 7 ships systemd 219). V2bX still runs as root (ACME on :80, cert
+# files, TUN-less but needs CAP_NET_ADMIN for socket buffers), but cannot
+# write outside /etc/V2bX and /usr/local/V2bX, cannot load kernel modules,
+# change sysctl or gain new privileges.
+systemd_hardening() {
+    local v
+    [[ "${V2BX_HARDEN:-1}" == "0" ]] && return 0
+    v=$(systemd_version)
+    [[ ${v} -ge 214 ]] || return 0
+    echo "# 安全加固（若证书等文件需写入其他目录，可用 systemctl edit V2bX 覆盖，或安装时设置 V2BX_HARDEN=0）"
+    echo "NoNewPrivileges=true"
+    echo "PrivateTmp=true"
+    echo "ProtectSystem=full"
+    echo "ProtectHome=read-only"
+    if [[ ${v} -ge 231 ]]; then
+        echo "ReadWritePaths=/etc/V2bX /usr/local/V2bX"
+        echo "RestrictRealtime=true"
+    else
+        echo "ReadWriteDirectories=/etc/V2bX /usr/local/V2bX"
+    fi
+    if [[ ${v} -ge 232 ]]; then
+        echo "ProtectKernelTunables=true"
+        echo "ProtectKernelModules=true"
+        echo "ProtectControlGroups=true"
+    fi
+    [[ ${v} -ge 235 ]] && echo "LockPersonality=true"
+    [[ ${v} -ge 242 ]] && echo "RestrictSUIDSGID=true"
+    echo "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER CAP_SYS_RESOURCE"
 }
 
 install_service() {
@@ -580,12 +631,15 @@ command_user="root"
 
 pidfile="/run/V2bX.pid"
 command_background="yes"
+output_log="/var/log/V2bX.log"
+error_log="/var/log/V2bX.log"
 
 depend() {
         need net
 }
 EOF
         chmod +x /etc/init.d/V2bX
+        touch /var/log/V2bX.log && chmod 600 /var/log/V2bX.log
         rc-update add V2bX default
     else
         rm -f /etc/systemd/system/V2bX.service
@@ -607,6 +661,8 @@ WorkingDirectory=/usr/local/V2bX/
 ExecStart=/usr/local/V2bX/V2bX server
 Restart=always
 RestartSec=10
+UMask=0077
+$(systemd_hardening)
 
 [Install]
 WantedBy=multi-user.target
@@ -639,6 +695,28 @@ copy_default_configs() {
     done
 }
 
+# config.json holds the Xboard server token, which is shared by ALL nodes:
+# whoever reads it can pull every user's UUID from the panel. Root only.
+secure_config_perms() {
+    chmod 700 /etc/V2bX
+    find /etc/V2bX -maxdepth 1 -type f \( -name '*.json' -o -name '*.yaml' -o -name '*.key' -o -name '*.bak*' \) \
+        -exec chmod 600 {} + 2>/dev/null
+}
+
+# Fetch V2bX.sh / initconfig.sh into DIR (failures only warn: the core
+# install is still usable, the management script can be fetched later).
+fetch_helper_scripts() {
+    local dir="$1"
+    if ! curl_tls "${dir}/V2bX.sh" "${SCRIPT_URL_BASE}/V2bX.sh" || [[ ! -s "${dir}/V2bX.sh" ]]; then
+        rm -f "${dir}/V2bX.sh"
+        err "下载 V2bX 管理脚本失败：${SCRIPT_URL_BASE}/V2bX.sh"
+    fi
+    if ! curl_tls "${dir}/initconfig.sh" "${SCRIPT_URL_BASE}/initconfig.sh" || [[ ! -s "${dir}/initconfig.sh" ]]; then
+        rm -f "${dir}/initconfig.sh"
+        err "下载配置向导失败：${SCRIPT_URL_BASE}/initconfig.sh"
+    fi
+}
+
 print_usage() {
     echo -e ""
     echo "V2bX 管理脚本使用方法 (兼容使用V2bX执行，大小写不敏感): "
@@ -662,13 +740,7 @@ print_usage() {
 }
 
 install_V2bX() {
-    if [[ -e /usr/local/V2bX/ ]]; then
-        rm -rf /usr/local/V2bX/
-    fi
-
-    mkdir -p /usr/local/V2bX/
-    cd /usr/local/V2bX/ || exit 1
-
+    local stage rc
     if [[ $# -eq 0 ]]; then
         last_version=$(get_latest_version)
         if [[ -z "${last_version}" ]]; then
@@ -676,25 +748,60 @@ install_V2bX() {
             exit 1
         fi
         echo -e "检测到 V2bX 最新版本：${last_version}，开始安装"
-        if ! download_v2bx_zip "${last_version}"; then
-            err "下载 V2bX 失败，请确保你的服务器能够下载 Github 的文件"
-            exit 1
-        fi
     else
         last_version=$1
         echo -e "开始安装 V2bX $1"
-        if ! download_v2bx_zip "${last_version}"; then
-            err "下载 V2bX $1 失败，请确保此版本存在"
-            exit 1
-        fi
+    fi
+    if ! valid_version "${last_version}"; then
+        err "版本号格式不正确：${last_version}"
+        exit 1
     fi
 
-    unzip V2bX-linux.zip
-    rm -f V2bX-linux.zip
-    chmod +x V2bX
+    # 1) everything is downloaded, verified and unpacked in a staging
+    #    directory next to the target (same filesystem: the final mv is atomic).
+    mkdir -p /usr/local
+    stage=$(mktemp -d /usr/local/.V2bX-stage.XXXXXX) || exit 1
+    # shellcheck disable=SC2064  # expand ${stage} now
+    trap "rm -rf '${stage}'" EXIT
+    download_v2bx_zip "${last_version}" "${stage}"
+    rc=$?
+    if [[ ${rc} -ne 0 ]]; then
+        [[ ${rc} -eq 1 ]] && err "下载 V2bX ${last_version} 失败，请确认此版本存在、且服务器能够访问 Github"
+        err "现有安装未做任何改动"
+        exit 1
+    fi
+    if ! (cd "${stage}" && unzip -q -o V2bX-linux.zip) || [[ ! -f "${stage}/V2bX" ]]; then
+        err "解压 V2bX 失败，现有安装未做任何改动"
+        exit 1
+    fi
+    rm -f "${stage}/V2bX-linux.zip"
+    chmod 755 "${stage}" "${stage}/V2bX"
+    fetch_helper_scripts "${stage}"
+
+    # 2) swap the installation in.
+    rm -rf /usr/local/V2bX.old
+    [[ -e /usr/local/V2bX ]] && mv /usr/local/V2bX /usr/local/V2bX.old
+    if ! mv "${stage}" /usr/local/V2bX; then
+        err "替换安装目录失败，正在恢复旧版本"
+        [[ -e /usr/local/V2bX.old ]] && mv /usr/local/V2bX.old /usr/local/V2bX
+        exit 1
+    fi
+    trap - EXIT
+    rm -rf /usr/local/V2bX.old
+    cd /usr/local/V2bX/ || exit 1
+
     mkdir -p /etc/V2bX/
     cp geoip.dat /etc/V2bX/
     cp geosite.dat /etc/V2bX/
+
+    if [[ -f V2bX.sh ]]; then
+        install -m 755 V2bX.sh /usr/bin/V2bX
+        rm -f V2bX.sh
+    fi
+    if [[ ! -L /usr/bin/v2bx ]]; then
+        ln -sf /usr/bin/V2bX /usr/bin/v2bx
+    fi
+    [[ -f initconfig.sh ]] && chmod 644 initconfig.sh
 
     install_service
 
@@ -704,6 +811,12 @@ install_V2bX() {
         echo -e "全新安装，请先参看教程：${DOC_URL}，配置必要的内容"
         first_install=true
     else
+        first_install=false
+    fi
+    copy_default_configs
+    secure_config_perms
+
+    if [[ ${first_install} == false ]]; then
         start_service
         sleep 2
         echo -e ""
@@ -714,40 +827,32 @@ install_V2bX() {
         else
             err "V2bX 可能启动失败，请稍后使用 V2bX log 查看日志信息，若无法启动，则可能更改了配置格式，请前往文档查看：${DOC_URL}"
         fi
-        first_install=false
-    fi
-
-    copy_default_configs
-
-    if ! curl_tls /usr/bin/V2bX.tmp "${SCRIPT_URL_BASE}/V2bX.sh"; then
-        rm -f /usr/bin/V2bX.tmp
-        err "下载 V2bX 管理脚本失败：${SCRIPT_URL_BASE}/V2bX.sh"
-    else
-        mv -f /usr/bin/V2bX.tmp /usr/bin/V2bX
-    fi
-    chmod +x /usr/bin/V2bX
-    if [[ ! -L /usr/bin/v2bx ]]; then
-        ln -s /usr/bin/V2bX /usr/bin/v2bx
-        chmod +x /usr/bin/v2bx
     fi
 
     cd "${cur_dir}" || true
-    rm -f install.sh
     print_usage
 
     # 首次安装询问是否生成配置文件
     if [[ ${first_install} == true ]]; then
-        read -rp "检测到你为第一次安装V2bX,是否自动直接生成配置文件？(y/n): " if_generate
+        read -rp "检测到你为第一次安装V2bX,是否立即生成对接 Xboard 的配置文件？(y/n): " if_generate
         if [[ ${if_generate} == [Yy] ]]; then
-            if curl_tls ./initconfig.sh "${SCRIPT_URL_BASE}/initconfig.sh"; then
+            if [[ -f /usr/local/V2bX/initconfig.sh ]]; then
                 # shellcheck source=/dev/null
-                source initconfig.sh
-                rm -f initconfig.sh
-                generate_config_file
+                source /usr/local/V2bX/initconfig.sh
+                if generate_config_file; then
+                    start_service
+                    sleep 2
+                    if check_status; then
+                        ok "V2bX 启动成功，请在 Xboard 节点列表确认节点已在线"
+                    else
+                        err "V2bX 可能启动失败，请使用 V2bX log 查看日志"
+                    fi
+                fi
             else
-                rm -f initconfig.sh
-                err "下载 initconfig.sh 失败，请稍后运行 V2bX generate 生成配置文件"
+                err "配置向导不可用，请稍后运行 V2bX generate 生成配置文件"
             fi
+        else
+            echo -e "请编辑 /etc/V2bX/config.json 后执行 V2bX start，或运行 V2bX generate"
         fi
     fi
 }
