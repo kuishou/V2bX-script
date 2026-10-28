@@ -481,8 +481,7 @@ add_node_config() {
             \"ReportMinTraffic\": 0,
             \"EnableProxyProtocol\": false,
             \"EnableUot\": true,
-            \"EnableTFO\": true,
-            \"DNSType\": \"UseIPv4\","
+            \"EnableTFO\": true,"
             ;;
         sing)
             # TFO 对 QUIC 类协议无意义；嗅探由 sing_origin.json 的 sniff 动作控制，
@@ -560,6 +559,35 @@ audit_json_list() {
     printf '\n'
 }
 
+# xray 的 connIdle（秒）：内存不超过 600MB 的机器用 120，其余用 300
+xray_conn_idle() {
+    local mem_kb
+    mem_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+    if [[ "${mem_kb}" =~ ^[0-9]+$ ]] && [[ ${mem_kb} -le 614400 ]]; then
+        echo 120
+    else
+        echo 300
+    fi
+}
+
+# xray 内部 DNS（custom_outbound 第一个出站按域名解析时使用）
+write_xray_dns_json() {
+    local strategy="UseIPv4"
+    [[ "$(check_ipv6_support)" == "1" ]] && strategy="UseIP"
+    write_secure "${CONF_DIR}/dns.json" <<EOF
+{
+    "servers": [
+        "1.1.1.1",
+        "8.8.8.8"
+    ],
+    "queryStrategy": "${strategy}"
+}
+EOF
+}
+
+# 未命中规则的流量走默认出站，即 custom_outbound.json 的第一个出站，
+# 节点自身的出站（EnableDNS / DNSType / SendIP）不会被使用，所以最后一条
+# 规则显式把剩余流量送到 IPv4_out
 write_route_json() {
     local audit="$1"
     {
@@ -574,6 +602,10 @@ write_route_json() {
             ]
         },
 EOF
+        # 没有 IPv6 时立即拒绝 IPv6 目标，客户端可马上回退，而不是等到超时
+        if [[ "$(check_ipv6_support)" != "1" ]]; then
+            printf '        {\n            "outboundTag": "block",\n            "ip": [\n                "::/0"\n            ]\n        },\n'
+        fi
         if [[ "${audit}" == y ]]; then
             printf '        {\n            "outboundTag": "block",\n            "domain": [\n'
             audit_json_list "regexp:" "                "
@@ -596,14 +628,17 @@ EOF
     } | write_secure "${CONF_DIR}/route.json"
 }
 
+# 第一个出站就是 xray 的默认出站：没有 IPv6 时只用 IPv4，有 IPv6 时优先 IPv4
 write_custom_outbound_json() {
-    write_secure "${CONF_DIR}/custom_outbound.json" <<'EOF'
+    local strategy="UseIPv4"
+    [[ "$(check_ipv6_support)" == "1" ]] && strategy="UseIPv4v6"
+    write_secure "${CONF_DIR}/custom_outbound.json" <<EOF
 [
     {
         "tag": "IPv4_out",
         "protocol": "freedom",
         "settings": {
-            "domainStrategy": "UseIPv4v6"
+            "domainStrategy": "${strategy}"
         }
     },
     {
@@ -695,21 +730,42 @@ EOF
 
 # hysteria2 的 ACL 只用 CIDR：使用 geoip/geosite 时 hysteria 会在运行时
 # 从 GitHub 下载未经校验的 geo 数据文件。
+# 出站：没有 IPv6 时只用 IPv4（mode "4"）并立即拒绝 IPv6 目标；
+# 有 IPv6 时优先 IPv4（mode "46"）。默认的 auto 在没有 IPv6 的机器上
+# 可能先尝试 IPv6 再失败。
+# 注：V2bX 强制开启 PMTU 探测，并且 initStreamReceiveWindow 实际不生效
+# （总是 8MB），这里只保留真正起作用的字段。
 write_hy2_config() {
-    write_secure "${CONF_DIR}/hy2config.yaml" <<'EOF'
+    local mode="4" reject_v6="    - reject(::/0)"
+    if [[ "$(check_ipv6_support)" == "1" ]]; then
+        mode="46"
+        reject_v6=""
+    fi
+    {
+        cat <<'EOF'
 quic:
-  initStreamReceiveWindow: 8388608
   maxStreamReceiveWindow: 8388608
   initConnReceiveWindow: 20971520
   maxConnReceiveWindow: 20971520
   maxIdleTimeout: 30s
   maxIncomingStreams: 1024
-  disablePathMTUDiscovery: false
 ignoreClientBandwidth: false
 disableUDP: false
 udpIdleTimeout: 60s
 resolver:
-  type: system
+  type: udp
+  udp:
+    addr: 1.1.1.1:53
+    timeout: 4s
+EOF
+        cat <<EOF
+outbounds:
+  - name: direct
+    type: direct
+    direct:
+      mode: "${mode}"
+EOF
+        cat <<'EOF'
 acl:
   inline:
     - reject(0.0.0.0/8)
@@ -722,9 +778,14 @@ acl:
     - reject(::1/128)
     - reject(fc00::/7)
     - reject(fe80::/10)
+EOF
+        [[ -n "${reject_v6}" ]] && printf '%s\n' "${reject_v6}"
+        cat <<'EOF'
+    - direct(all)
 masquerade:
   type: 404
 EOF
+    } | write_secure "${CONF_DIR}/hy2config.yaml"
 }
 
 generate_config_file() {
@@ -763,6 +824,8 @@ generate_config_file() {
     ask_yn "是否额外启用原版域名审计列表?" n && audit=y
 
     if [[ "${core_xray}" == true ]]; then
+        # V2bX 默认 connIdle 只有 30 秒，空闲的长连接（SSH、IM、游戏）会被断开；
+        # 改用 Xray 官方默认 300 秒，小内存机器用 120 秒
         cores_config+="
     {
         \"Type\": \"xray\",
@@ -770,8 +833,16 @@ generate_config_file() {
             \"Level\": \"error\",
             \"ErrorPath\": \"${CONF_DIR}/error.log\"
         },
+        \"DnsConfigPath\": \"${CONF_DIR}/dns.json\",
         \"OutboundConfigPath\": \"${CONF_DIR}/custom_outbound.json\",
-        \"RouteConfigPath\": \"${CONF_DIR}/route.json\"
+        \"RouteConfigPath\": \"${CONF_DIR}/route.json\",
+        \"XrayConnectionConfig\": {
+            \"handshake\": 4,
+            \"connIdle\": $(xray_conn_idle),
+            \"uplinkOnly\": 2,
+            \"downlinkOnly\": 5,
+            \"bufferSize\": 64
+        }
     },"
     fi
     if [[ "${core_sing}" == true ]]; then
@@ -838,11 +909,12 @@ EOF
         return 1
     fi
 
-    for i in config.json route.json custom_outbound.json sing_origin.json hy2config.yaml; do
+    for i in config.json dns.json route.json custom_outbound.json sing_origin.json hy2config.yaml; do
         backup_file "${CONF_DIR}/${i}"
     done
     chmod 600 "${tmp}"
     mv -f "${tmp}" "${CONF_DIR}/config.json"
+    write_xray_dns_json
     write_custom_outbound_json
     write_route_json "${audit}"
     write_sing_origin_json "${audit}"

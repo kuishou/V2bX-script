@@ -255,7 +255,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 - **3. file**：使用已有的证书文件（默认 `/etc/V2bX/fullchain.cer`、`/etc/V2bX/cert.key`）。
 - **4. self**：自动生成自签名证书，客户端需允许不安全证书，不推荐。
 
-向导完成后会生成：`/etc/V2bX/config.json`、`custom_outbound.json`、`route.json`、`sing_origin.json`、`hy2config.yaml`（均为 600 权限，目录 700），并自动 **重启 V2bX**。之后可随时用 `V2bX check` 再次检测所有节点的对接状态。
+向导完成后会生成：`/etc/V2bX/config.json`、`dns.json`、`custom_outbound.json`、`route.json`、`sing_origin.json`、`hy2config.yaml`（均为 600 权限，目录 700；出站的 IPv4 / IPv6 策略按服务器是否有公网 IPv6 自动选择），并自动 **重启 V2bX**。之后可随时用 `V2bX check` 再次检测所有节点的对接状态。
 
 > 本地审计规则默认只阻断 **内网 / 回环地址**（防止用户借节点访问服务器内网或云厂商元数据接口 169.254.169.254）和 **BT 下载**。原版那份大而全的域名屏蔽列表（会屏蔽 gov / bank / taobao / 360 等）改为可选；更推荐在 Xboard「路由管理」中按节点统一下发审计规则。
 
@@ -288,8 +288,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
                 "Level": "error",
                 "ErrorPath": "/etc/V2bX/error.log"
             },
+            "DnsConfigPath": "/etc/V2bX/dns.json",
             "OutboundConfigPath": "/etc/V2bX/custom_outbound.json",
-            "RouteConfigPath": "/etc/V2bX/route.json"
+            "RouteConfigPath": "/etc/V2bX/route.json",
+            "XrayConnectionConfig": {
+                "handshake": 4,
+                "connIdle": 300,
+                "uplinkOnly": 2,
+                "downlinkOnly": 5,
+                "bufferSize": 64
+            }
         }
     ],
     "Nodes": [
@@ -307,7 +315,6 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
             "EnableProxyProtocol": false,
             "EnableUot": true,
             "EnableTFO": true,
-            "DNSType": "UseIPv4",
             "CertConfig": {
                 "CertMode": "none",
                 "RejectUnknownSni": false,

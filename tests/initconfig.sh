@@ -80,6 +80,38 @@ check "sing_origin 屏蔽 BT 用 reject" '[[ "$(jq -r "[.route.rules[]|select(.p
 check "sing_origin 不再使用 block 出站" '! grep -q "\"block\"" "${sing}"'
 check "sing_origin DNS 使用新写法" '[[ "$(jq -r ".dns.servers[0].type" "${sing}")" == udp && "$(jq ".dns.servers[0]|has(\"address\")" "${sing}")" == false ]]'
 check "启用审计时 sing_origin 含 domain_regex reject" '[[ "$(jq -r "[.route.rules[]|select(.domain_regex)][0].action" "${sing}")" == reject ]]'
+# xray：连接策略、DNS 路径，以及节点里不再写无效的 DNSType
+check "xray 核心写入 XrayConnectionConfig（connIdle 120/300）" '[[ "$(jq ".Cores[]|select(.Type==\"xray\").XrayConnectionConfig.connIdle" "${cfg}")" =~ ^(120|300)$ ]]'
+check "xray 核心引用 dns.json" '[[ "$(jq -r ".Cores[]|select(.Type==\"xray\").DnsConfigPath" "${cfg}")" == "${V2BX_CONF_DIR}/dns.json" ]] && jq empty "${V2BX_CONF_DIR}/dns.json"'
+check "xray 节点不写无效的 DNSType" '[[ "$(jq "[.Nodes[]|select(.Core==\"xray\")|has(\"DNSType\")]|any" "${cfg}")" == false ]]'
+check "hy2config 解析器为 udp 且以 direct(all) 结尾" 'grep -q "^  type: udp" "${V2BX_CONF_DIR}/hy2config.yaml" && [[ "$(grep -E "^    - " "${V2BX_CONF_DIR}/hy2config.yaml" | tail -n 1)" == "    - direct(all)" ]]'
+check "hy2config 不写不生效的 initStreamReceiveWindow" '! grep -q initStreamReceiveWindow "${V2BX_CONF_DIR}/hy2config.yaml"'
+
+# 按 IPv6 情况生成：分别强制「无 IPv6」「有 IPv6」各生成一次
+gen_variant() {   # usage: gen_variant 0|1 DIR
+    ( v6flag="$1"
+      check_ipv6_support() { echo "${v6flag}"; }
+      # shellcheck disable=SC2034  # 被 source 进来的 write_* 函数使用
+      CONF_DIR="$2"
+      write_xray_dns_json; write_custom_outbound_json; write_route_json n
+      write_sing_origin_json n; write_hy2_config )
+}
+v4dir="${V2BX_CONF_DIR}/variant-v4"; v6dir="${V2BX_CONF_DIR}/variant-v6"
+mkdir -p "${v4dir}" "${v6dir}"
+gen_variant 0 "${v4dir}"; gen_variant 1 "${v6dir}"
+# shellcheck disable=SC2034
+q='.[0].settings.domainStrategy'
+check "无 IPv6：xray DNS 只查 IPv4、默认出站 UseIPv4" '[[ "$(jq -r .queryStrategy "${v4dir}/dns.json")" == UseIPv4 && "$(jq -r "${q}" "${v4dir}/custom_outbound.json")" == UseIPv4 ]]'
+check "无 IPv6：xray 路由屏蔽 ::/0" '[[ "$(jq "[.rules[]|select(.ip==[\"::/0\"])]|length" "${v4dir}/route.json")" -eq 1 ]]'
+check "无 IPv6：hy2 出站 mode 4 并拒绝 ::/0" 'grep -q "mode: \"4\"" "${v4dir}/hy2config.yaml" && grep -q "reject(::/0)" "${v4dir}/hy2config.yaml"'
+check "无 IPv6：sing_origin ipv4_only 并拒绝 ::/0" '[[ "$(jq -r .dns.strategy "${v4dir}/sing_origin.json")" == ipv4_only && "$(jq "[.route.rules[]|select(.ip_cidr==[\"::/0\"])]|length" "${v4dir}/sing_origin.json")" -eq 1 ]]'
+check "有 IPv6：xray DNS UseIP、默认出站 UseIPv4v6" '[[ "$(jq -r .queryStrategy "${v6dir}/dns.json")" == UseIP && "$(jq -r "${q}" "${v6dir}/custom_outbound.json")" == UseIPv4v6 ]]'
+check "有 IPv6：xray 路由不屏蔽 ::/0" '[[ "$(jq "[.rules[]|select(.ip==[\"::/0\"])]|length" "${v6dir}/route.json")" -eq 0 ]]'
+check "有 IPv6：hy2 出站 mode 46 且不拒绝 ::/0" 'grep -q "mode: \"46\"" "${v6dir}/hy2config.yaml" && ! grep -q "reject(::/0)" "${v6dir}/hy2config.yaml"'
+check "有 IPv6：sing_origin prefer_ipv4 且不拒绝 ::/0" '[[ "$(jq -r .dns.strategy "${v6dir}/sing_origin.json")" == prefer_ipv4 && "$(jq "[.route.rules[]|select(.ip_cidr)]|length" "${v6dir}/sing_origin.json")" -eq 0 ]]'
+for f in dns.json custom_outbound.json route.json sing_origin.json; do
+    check "两种 IPv6 情况下 ${f} 均为合法 JSON" 'jq empty "${v4dir}/${f}" && jq empty "${v6dir}/${f}"'
+done
 check "使用 ReportMinTraffic 键名" '[[ "$(jq ".Nodes[0]|has(\"ReportMinTraffic\")" "${cfg}")" == true ]]'
 check "hy2 证书域名取自面板 server_name" '[[ "$(jq -r ".Nodes[1].CertConfig.CertDomain" "${cfg}")" == hy.example.com ]]'
 check "dns 模式写入 CF_DNS_API_TOKEN" '[[ "$(jq -r ".Nodes[1].CertConfig.DNSEnv.CF_DNS_API_TOKEN" "${cfg}")" == "cf\"tok\\en" ]]'

@@ -64,6 +64,9 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 | F10 | `V2bX config` 编辑后不检查语法直接重启 | 一个逗号就让节点掉线 | **已修复**：JSON 不合法时不重启 |
 | F11 | OpenRC（Alpine）没有日志，`V2bX log` 直接退出 | 无法排错 | **已修复**：日志写入 `/var/log/V2bX.log` |
 | F12 | 原版默认带一份大而全的域名屏蔽列表（gov、bank、taobao、visa、360……） | 大量正常访问被静默阻断 | **改为可选**（默认关闭）；默认只阻断内网地址与 BT。推荐在 Xboard「路由管理」下发 |
+| F13 | xray 核心没有写 `XrayConnectionConfig`，V2bX 默认 `connIdle` 只有 30 秒（Xray 官方默认 300） | 空闲 30 秒的连接被断开：SSH、IM、游戏大厅等长连接频繁掉线 | **已修复**：写入 `connIdle: 300`（内存 ≤ 600MB 时 120），`downlinkOnly` 改为官方默认 5 |
+| F14 | xray 节点写 `"DNSType": "UseIPv4"`；但未命中路由的流量走 `custom_outbound.json` 的第一个出站，节点自身出站（`EnableDNS` / `DNSType` / `SendIP`）根本不被使用，且 `DNSType` 只在 `EnableDNS: true` 时才被读取 | 设置无效 | **已修复**：不再写 `DNSType`；改为生成 `dns.json`（`queryStrategy`），并按是否有公网 IPv6 设置第一个出站的 `domainStrategy`（`UseIPv4` / `UseIPv4v6`）；无 IPv6 时 route.json 屏蔽 `::/0`，客户端可立即回退 |
+| F15 | hy2config 解析器为 `system`，出站模式为默认 `auto`；`initStreamReceiveWindow` 因 V2bX 的赋值错误实际不生效 | 无 IPv6 的机器可能先尝试 IPv6 再失败 | **已修复**：解析器改为 `udp` 1.1.1.1；出站 `mode` 按 IPv6 情况设为 `"4"` / `"46"`，无 IPv6 时 ACL 拒绝 `::/0`，并以 `direct(all)` 结尾；不再写不生效的 `initStreamReceiveWindow` / `disablePathMTUDiscovery` |
 
 ### 2.3 新增的 Xboard 对接能力
 
