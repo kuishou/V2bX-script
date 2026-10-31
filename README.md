@@ -94,7 +94,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 - **systemd 沙箱**：`NoNewPrivileges`、`ProtectSystem=full`、只允许写 `/etc/V2bX` 与 `/usr/local/V2bX`、收缩能力集（`V2BX_HARDEN=0` 可关闭）。
 - **防火墙**：菜单 16 由「关闭防火墙、清空 iptables」改为「放行指定端口」。
 - **TLS**：去掉 `--no-check-certificate`，始终校验证书；证书错误时不再自动跳过校验，只有显式设置 `V2BX_INSECURE=1` 才跳过校验重试一次（系统 CA 过旧时使用，不推荐）。
-- **完整性校验**：下载 `V2bX-linux-<arch>.zip` 后用同一 Release 的 `.zip.dgst` 校验 SHA-256，不匹配立即中止；菜单 11 的第三方 BBR 脚本固定到指定 commit 并校验 SHA-256，运行前需确认；菜单 16（关闭防火墙）运行前需确认。管理脚本 / 安装脚本先下载到临时文件，下载失败不会覆盖已有的 `/usr/bin/V2bX`。
+- **完整性校验**：下载 `V2bX-linux-<arch>.zip` 后用同一 Release 的 `.zip.dgst` 校验 SHA-256，不匹配立即中止；菜单 11 的第三方 BBR 脚本固定到指定 commit 并校验 SHA-256，运行前需确认。管理脚本 / 安装脚本先下载到临时文件，下载失败不会覆盖已有的 `/usr/bin/V2bX`。
 
 - **系统识别**：优先读取 `/etc/os-release` 的 `ID` / `ID_LIKE`（不直接 source，避免副作用），识别 centos、rhel、rocky、almalinux、ol、fedora、ubuntu、debian、alpine、arch 及其衍生版；
   缺少 os-release 时依次回退到 `/etc/redhat-release`、`/etc/alpine-release`、`/etc/arch-release`、`/etc/lsb-release`、`/etc/debian_version`，最后才使用上游的 `/etc/issue`、`/proc/version` 规则（容器中 `/proc/version` 反映的是宿主机内核，容易误判）。

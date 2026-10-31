@@ -470,9 +470,9 @@ add_node_config() {
     while true; do
         read -rp "请输入 [1-3]：" sel
         case "${sel}" in
-            1) core="xray"; core_xray=true; break ;;
-            2) core="sing"; core_sing=true; break ;;
-            3) core="hysteria2"; core_hysteria2=true; break ;;
+            1) core="xray"; break ;;
+            2) core="sing"; break ;;
+            3) core="hysteria2"; break ;;
             *) echo "无效的选择，请输入 1 2 3" ;;
         esac
     done
@@ -618,6 +618,12 @@ add_node_config() {
             }
         }"
     nodes_config+=("${node_json}")
+    # 只为实际生成了节点的内核写入 Cores（跳过的节点不能留下空跑的内核）
+    case "${core}" in
+        xray) core_xray=true ;;
+        sing) core_sing=true ;;
+        hysteria2) core_hysteria2=true ;;
+    esac
     return 0
 }
 

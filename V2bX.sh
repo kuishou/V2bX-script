@@ -29,6 +29,8 @@ fi
 # Set V2BX_INSECURE=1 to allow ONE retry without TLS verification after a
 # certificate error (outdated CA bundle). Off by default.
 V2BX_INSECURE="${V2BX_INSECURE:-0}"
+# Fail fast on unreachable hosts, retry transient network errors.
+CURL_NET_OPTS=(--connect-timeout 15 --retry 2 --retry-delay 2)
 # ---------------------------------------------------------------------------
 
 red='\033[0;31m'
@@ -84,14 +86,14 @@ before_show_menu() {
 # user explicitly set V2BX_INSECURE=1.
 fetch_tls() {
     local url="$1" out="$2" rc
-    curl -fLs -o "${out}" "${url}"
+    curl -fLs "${CURL_NET_OPTS[@]}" -o "${out}" "${url}"
     rc=$?
     case "${rc}" in
         35|51|58|60|77|83)
             echo -e "${red}TLS 证书校验失败：${url}${plain}"
             if [[ "${V2BX_INSECURE}" == "1" ]]; then
                 echo -e "${yellow}V2BX_INSECURE=1：跳过证书校验重试一次${plain}"
-                curl -kfLs -o "${out}" "${url}"
+                curl -kfLs "${CURL_NET_OPTS[@]}" -o "${out}" "${url}"
                 rc=$?
             else
                 echo -e "${yellow}系统 CA 证书可能过旧（或系统时间不正确），请更新 ca-certificates 后重试；确需临时跳过校验可设置 V2BX_INSECURE=1（不推荐）${plain}"
@@ -167,7 +169,7 @@ config() {
         echo -e "${red}config.json 不是合法的 JSON，已取消重启，请重新编辑（V2bX config）${plain}"
         return 1
     fi
-    restart
+    restart 0
     check_status
     case $? in
         0)
@@ -178,12 +180,16 @@ config() {
             read -e -rp "(默认: y):" yn
             [[ -z ${yn} ]] && yn="y"
             if [[ ${yn} == [Yy] ]]; then
-               show_log
+               show_log 0
             fi
             ;;
         2)
             echo -e "V2bX状态: ${red}未安装${plain}"
     esac
+    # 菜单中调用时没有参数，返回主菜单；命令行 V2bX config 直接结束
+    if [[ $# == 0 ]]; then
+        before_show_menu
+    fi
 }
 
 uninstall() {
@@ -389,23 +395,22 @@ install_bbr() {
 
 update_shell() {
     local tmp
-    tmp=$(mktemp /tmp/V2bX-sh.XXXXXX)
-    if fetch_tls "${SCRIPT_URL_BASE}/V2bX.sh" "${tmp}" && [[ -s "${tmp}" ]] && bash -n "${tmp}"; then
-        mv -f "${tmp}" /usr/bin/V2bX
-        rm -f /usr/local/V2bX/initconfig.sh
-        [[ -d /usr/local/V2bX ]] && load_initconfig >/dev/null
-    else
+    tmp=$(mktemp /tmp/V2bX-sh.XXXXXX) || return 1
+    if ! fetch_tls "${SCRIPT_URL_BASE}/V2bX.sh" "${tmp}" || [[ ! -s "${tmp}" ]] || ! bash -n "${tmp}"; then
         rm -f "${tmp}"
-        false
-    fi
-    if [[ $? != 0 ]]; then
         echo ""
         echo -e "${red}下载脚本失败，请检查本机能否连接 Github${plain}"
         before_show_menu
-    else
-        chmod +x /usr/bin/V2bX
-        echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
+        return 1
     fi
+    install -m 755 "${tmp}" /usr/bin/V2bX
+    rm -f "${tmp}"
+    # 配置向导随管理脚本一起更新（未安装 V2bX 时跳过，之后 generate 会按需下载）
+    if [[ -d /usr/local/V2bX ]]; then
+        rm -f /usr/local/V2bX/initconfig.sh
+        load_initconfig >/dev/null || echo -e "${yellow}配置向导更新失败，下次执行 V2bX generate / check 时会重新下载${plain}"
+    fi
+    echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
 }
 
 # 0: running, 1: not running, 2: not installed
@@ -563,17 +568,25 @@ xboard_check() {
 
 # 放行指定端口（TCP+UDP）。只添加放行规则，不关闭防火墙、不清空已有规则。
 open_ports() {
-    local ports p ok_any=0 fw=""
+    local ports p lo hi norm="" ok_any=0 fw=""
     echo -e "${yellow}请输入需要放行的端口，多个用空格或逗号分隔（如 443 8443），可写范围 20000-20100${plain}"
     echo -e "${yellow}提示：节点端口以 Xboard 中的「连接端口/服务端口」为准；http 证书模式还需放行 80${plain}"
     read -rp "端口: " ports
     ports=${ports//,/ }
     for p in ${ports}; do
-        if [[ ! "${p}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?$ ]] || [[ ${p%-*} -lt 1 || ${p#*-} -gt 65535 ]]; then
+        if [[ ! "${p}" =~ ^[0-9]{1,5}(-[0-9]{1,5})?$ ]]; then
             echo -e "${red}端口格式错误：${p}${plain}"
             return 1
         fi
+        # 10# 按十进制解析，避免 08 / 09 被当成八进制报错
+        lo=$((10#${p%-*})); hi=$((10#${p#*-}))
+        if [[ ${lo} -lt 1 || ${hi} -gt 65535 || ${lo} -gt ${hi} ]]; then
+            echo -e "${red}端口超出范围或起止颠倒：${p}${plain}"
+            return 1
+        fi
+        if [[ ${lo} -eq ${hi} ]]; then norm+=" ${lo}"; else norm+=" ${lo}-${hi}"; fi
     done
+    ports="${norm# }"
     [[ -z "${ports}" ]] && echo "未输入端口" && return 0
 
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then

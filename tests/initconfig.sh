@@ -194,6 +194,7 @@ check "机器令牌：生成 2 个节点（跳过未绑定的节点）" '[[ $(jq
 check "机器令牌：每个节点写入 MachineID 7（数字）" '[[ "$(jq -c "[.Nodes[].MachineID]" "${mcfg}")" == "[7,7]" ]]'
 check "机器令牌：ApiKey 为机器令牌（特殊字符原样保存）" '[[ "$(jq -r ".Nodes[0].ApiKey" "${mcfg}")" == "${mtoken}" && "$(jq -r ".Nodes[1].ApiKey" "${mcfg}")" == "${mtoken}" ]]'
 check "机器令牌：NodeID 为数字" '[[ "$(jq -c "[.Nodes[].NodeID]" "${mcfg}")" == "[1,2]" ]]'
+check "跳过的节点不留下空跑的内核（无 xray）" '[[ "$(jq -c "[.Cores[].Type]|sort" "${mcfg}")" == "[\"hysteria2\",\"sing\"]" ]]'
 check "机器令牌：非法 MachineID 被拒绝" '[[ $(grep -c "机器 ID 必须是正整数" "${mdir}/wizard.out") -eq 2 ]]'
 check "机器令牌：提示核心版本要求与数字 NodeID" 'grep -q "feat/xboard-machine-token" "${mdir}/wizard.out" && grep -q "b1e8646" "${mdir}/wizard.out" && grep -q "不支持节点 code" "${mdir}/wizard.out"'
 check "机器令牌：未绑定节点给出原因" 'grep -q "节点不在该机器上" "${mdir}/wizard.out"'
