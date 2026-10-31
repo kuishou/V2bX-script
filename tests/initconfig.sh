@@ -1,0 +1,137 @@
+#!/bin/bash
+# 离线端到端测试 initconfig.sh：启动 Xboard 模拟服务端，按顺序喂入向导答案，
+# 检查生成的配置（JSON 合法、字段名、权限、特殊字符转义、对接检测）。
+# 需要：bash curl jq python3
+# usage: bash tests/initconfig.sh /path/to/initconfig.sh
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+fail=0
+ok()   { echo "ok   $*"; }
+bad()  { echo "FAIL $*"; fail=1; }
+check() { if eval "$2"; then ok "$1"; else bad "$1"; return 1; fi; }
+
+port=18080
+token='Tok"en\with-specials-1234'
+python3 "${here}/xboard_mock.py" "${port}" "${token}" &
+mock=$!
+trap 'kill ${mock} 2>/dev/null; rm -rf "${V2BX_CONF_DIR}"' EXIT
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -s "http://127.0.0.1:${port}/" >/dev/null 2>&1 && break
+    sleep 0.3
+done
+
+export V2BX_CONF_DIR
+V2BX_CONF_DIR=$(mktemp -d)
+# shellcheck source=/dev/null
+source "$1"
+
+# --- 面板地址校验 ---
+( normalize_api_host "http://panel.example.com" >/dev/null ); check "拒绝公网 http 面板地址" '[[ $? -ne 0 ]]'
+( normalize_api_host "panel.example.com" >/dev/null );        check "拒绝缺少协议的地址" '[[ $? -ne 0 ]]'
+normalize_api_host "https://panel.example.com///" >/dev/null; check "去掉结尾斜杠" '[[ "${ApiHost}" == "https://panel.example.com" ]]'
+( V2BX_ALLOW_HTTP=1 normalize_api_host "http://10.0.0.2" >/dev/null ); check "V2BX_ALLOW_HTTP=1 允许 http" '[[ $? -eq 0 ]]'
+
+# --- 直接探测 ---
+xboard_probe "http://127.0.0.1:${port}" "wrong-token-xxxxxxxx" 1 vless > "${V2BX_CONF_DIR}/p.out"
+check "错误密钥被识别" 'grep -q "通讯密钥错误" "${V2BX_CONF_DIR}/p.out"'
+xboard_probe "http://127.0.0.1:${port}" "${token}" 5 vless > "${V2BX_CONF_DIR}/p.out"
+check "节点不存在被识别" 'grep -q "节点不存在" "${V2BX_CONF_DIR}/p.out"'
+xboard_probe "http://127.0.0.1:${port}" "${token}" 2 hysteria2 >/dev/null
+check "hysteria2 作为 hysteria 别名对接成功" '[[ $? -eq 0 && "$(probe_field_num version)" == 2 ]]'
+
+# --- 向导 ---
+answers=(
+    y                                   # 确定继续
+    "http://127.0.0.1:${port}/"         # 面板地址
+    "${token}"                          # 通讯密钥
+    y                                   # 后续节点使用相同面板
+    2 1 2                               # 节点1: sing / ID 1 / vless (面板 tls=2 => reality，无需证书)
+    y                                   # 继续添加
+    3 2                                 # 节点2: hysteria2 内核 / ID 2
+    2 "" "" "" 'cf"tok\en'              # dns 证书 / 默认域名 / 邮箱留空 / cloudflare / token
+    y                                   # 继续添加
+    1 3 4                               # 节点3: xray / ID 3 / trojan (tls=1)
+    3 "" "" ""                          # file 证书 / 默认域名 / 默认路径 x2
+    y                                   # 继续添加
+    1 99 1 n                            # 节点4: 不存在 -> 不继续 -> 跳过
+    n                                   # 不再添加
+    y                                   # 启用原版审计列表
+)
+printf '%s\n' "${answers[@]}" | generate_config_file > "${V2BX_CONF_DIR}/wizard.out" 2>&1
+# rc / cfg 在 check 的 eval 字符串中使用
+# shellcheck disable=SC2034
+rc=$?
+# shellcheck disable=SC2034
+cfg="${V2BX_CONF_DIR}/config.json"
+check "向导返回成功" '[[ ${rc} -eq 0 ]]' || sed -n '1,200p' "${V2BX_CONF_DIR}/wizard.out"
+for f in config.json route.json custom_outbound.json sing_origin.json; do
+    check "${f} 为合法 JSON" 'jq empty "${V2BX_CONF_DIR}/${f}"'
+done
+check "生成 3 个节点（跳过不存在的节点）" '[[ $(jq ".Nodes|length" "${cfg}") -eq 3 ]]'
+check "通讯密钥特殊字符原样保存" '[[ "$(jq -r ".Nodes[0].ApiKey" "${cfg}")" == "${token}" ]]'
+check "ApiHost 已规范化" '[[ "$(jq -r ".Nodes[0].ApiHost" "${cfg}")" == "http://127.0.0.1:${port}" ]]'
+check "reality 节点 CertMode=none" '[[ "$(jq -r ".Nodes[0].CertConfig.CertMode" "${cfg}")" == none ]]'
+check "sing 使用正确键名 EnableTFO，不写无效的嗅探键" '[[ "$(jq ".Nodes[0]|has(\"EnableTFO\")" "${cfg}")" == true && "$(jq ".Nodes[0]|has(\"EnableSniff\") or has(\"SniffEnabled\")" "${cfg}")" == false ]]'
+# sing 内核的嗅探只由 sing_origin.json 的路由规则决定（sing 在 check 的 eval 字符串中使用）
+# shellcheck disable=SC2034
+sing="${V2BX_CONF_DIR}/sing_origin.json"
+check "sing_origin 第一条规则是 sniff 动作" '[[ "$(jq -r ".route.rules[0].action" "${sing}")" == sniff ]]'
+check "sing_origin 屏蔽 BT 用 reject" '[[ "$(jq -r "[.route.rules[]|select(.protocol==[\"bittorrent\"])][0].action" "${sing}")" == reject ]]'
+check "sing_origin 不再使用 block 出站" '! grep -q "\"block\"" "${sing}"'
+check "sing_origin DNS 使用新写法" '[[ "$(jq -r ".dns.servers[0].type" "${sing}")" == udp && "$(jq ".dns.servers[0]|has(\"address\")" "${sing}")" == false ]]'
+check "启用审计时 sing_origin 含 domain_regex reject" '[[ "$(jq -r "[.route.rules[]|select(.domain_regex)][0].action" "${sing}")" == reject ]]'
+# xray：连接策略、DNS 路径，以及节点里不再写无效的 DNSType
+check "xray 核心写入 XrayConnectionConfig（connIdle 120/300）" '[[ "$(jq ".Cores[]|select(.Type==\"xray\").XrayConnectionConfig.connIdle" "${cfg}")" =~ ^(120|300)$ ]]'
+check "xray 核心引用 dns.json" '[[ "$(jq -r ".Cores[]|select(.Type==\"xray\").DnsConfigPath" "${cfg}")" == "${V2BX_CONF_DIR}/dns.json" ]] && jq empty "${V2BX_CONF_DIR}/dns.json"'
+check "xray 节点不写无效的 DNSType" '[[ "$(jq "[.Nodes[]|select(.Core==\"xray\")|has(\"DNSType\")]|any" "${cfg}")" == false ]]'
+check "hy2config 解析器为 udp 且以 direct(all) 结尾" 'grep -q "^  type: udp" "${V2BX_CONF_DIR}/hy2config.yaml" && [[ "$(grep -E "^    - " "${V2BX_CONF_DIR}/hy2config.yaml" | tail -n 1)" == "    - direct(all)" ]]'
+check "hy2config 不写不生效的 initStreamReceiveWindow" '! grep -q initStreamReceiveWindow "${V2BX_CONF_DIR}/hy2config.yaml"'
+
+# 按 IPv6 情况生成：分别强制「无 IPv6」「有 IPv6」各生成一次
+gen_variant() {   # usage: gen_variant 0|1 DIR
+    ( v6flag="$1"
+      check_ipv6_support() { echo "${v6flag}"; }
+      # shellcheck disable=SC2034  # 被 source 进来的 write_* 函数使用
+      CONF_DIR="$2"
+      write_xray_dns_json; write_custom_outbound_json; write_route_json n
+      write_sing_origin_json n; write_hy2_config )
+}
+v4dir="${V2BX_CONF_DIR}/variant-v4"; v6dir="${V2BX_CONF_DIR}/variant-v6"
+mkdir -p "${v4dir}" "${v6dir}"
+gen_variant 0 "${v4dir}"; gen_variant 1 "${v6dir}"
+# shellcheck disable=SC2034
+q='.[0].settings.domainStrategy'
+check "无 IPv6：xray DNS 只查 IPv4、默认出站 UseIPv4" '[[ "$(jq -r .queryStrategy "${v4dir}/dns.json")" == UseIPv4 && "$(jq -r "${q}" "${v4dir}/custom_outbound.json")" == UseIPv4 ]]'
+check "无 IPv6：xray 路由屏蔽 ::/0" '[[ "$(jq "[.rules[]|select(.ip==[\"::/0\"])]|length" "${v4dir}/route.json")" -eq 1 ]]'
+check "无 IPv6：hy2 出站 mode 4 并拒绝 ::/0" 'grep -q "mode: \"4\"" "${v4dir}/hy2config.yaml" && grep -q "reject(::/0)" "${v4dir}/hy2config.yaml"'
+check "无 IPv6：sing_origin ipv4_only 并拒绝 ::/0" '[[ "$(jq -r .dns.strategy "${v4dir}/sing_origin.json")" == ipv4_only && "$(jq "[.route.rules[]|select(.ip_cidr==[\"::/0\"])]|length" "${v4dir}/sing_origin.json")" -eq 1 ]]'
+check "有 IPv6：xray DNS UseIP、默认出站 UseIPv4v6" '[[ "$(jq -r .queryStrategy "${v6dir}/dns.json")" == UseIP && "$(jq -r "${q}" "${v6dir}/custom_outbound.json")" == UseIPv4v6 ]]'
+check "有 IPv6：xray 路由不屏蔽 ::/0" '[[ "$(jq "[.rules[]|select(.ip==[\"::/0\"])]|length" "${v6dir}/route.json")" -eq 0 ]]'
+check "有 IPv6：hy2 出站 mode 46 且不拒绝 ::/0" 'grep -q "mode: \"46\"" "${v6dir}/hy2config.yaml" && ! grep -q "reject(::/0)" "${v6dir}/hy2config.yaml"'
+check "有 IPv6：sing_origin prefer_ipv4 且不拒绝 ::/0" '[[ "$(jq -r .dns.strategy "${v6dir}/sing_origin.json")" == prefer_ipv4 && "$(jq "[.route.rules[]|select(.ip_cidr)]|length" "${v6dir}/sing_origin.json")" -eq 0 ]]'
+for f in dns.json custom_outbound.json route.json sing_origin.json; do
+    check "两种 IPv6 情况下 ${f} 均为合法 JSON" 'jq empty "${v4dir}/${f}" && jq empty "${v6dir}/${f}"'
+done
+check "使用 ReportMinTraffic 键名" '[[ "$(jq ".Nodes[0]|has(\"ReportMinTraffic\")" "${cfg}")" == true ]]'
+check "hy2 证书域名取自面板 server_name" '[[ "$(jq -r ".Nodes[1].CertConfig.CertDomain" "${cfg}")" == hy.example.com ]]'
+check "dns 模式写入 CF_DNS_API_TOKEN" '[[ "$(jq -r ".Nodes[1].CertConfig.DNSEnv.CF_DNS_API_TOKEN" "${cfg}")" == "cf\"tok\\en" ]]'
+check "trojan 使用 file 证书模式" '[[ "$(jq -r ".Nodes[2].CertConfig.CertMode" "${cfg}")" == file ]]'
+check "Cores 含 sing/hysteria2/xray" '[[ "$(jq -c "[.Cores[].Type]|sort" "${cfg}")" == "[\"hysteria2\",\"sing\",\"xray\"]" ]]'
+check "启用审计时 route.json 含域名规则" '[[ $(jq "[.rules[]|select(.domain)]|length" "${V2BX_CONF_DIR}/route.json") -eq 1 ]]'
+check "hy2 ACL 不依赖 geo 文件" '! grep -q "geoip\|geosite" "${V2BX_CONF_DIR}/hy2config.yaml"'
+perm() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
+check "配置目录权限 700" '[[ "$(perm "${V2BX_CONF_DIR}")" == 700 ]]'
+check "config.json 权限 600" '[[ "$(perm "${cfg}")" == 600 ]]'
+check "通讯密钥未出现在向导输出中" '! grep -qF "${token}" "${V2BX_CONF_DIR}/wizard.out"'
+
+# --- 再生成一次：旧配置被备份 ---
+printf '%s\n' y "http://127.0.0.1:${port}" "${token}" y 2 1 2 n n | generate_config_file >/dev/null 2>&1
+check "重新生成时备份旧 config.json" 'ls "${V2BX_CONF_DIR}"/config.json.bak.* >/dev/null 2>&1'
+check "未启用审计时 route.json 无域名规则" '[[ $(jq "[.rules[]|select(.domain)]|length" "${V2BX_CONF_DIR}/route.json") -eq 0 ]]'
+check "未启用审计时 sing_origin 合法且无 domain_regex" 'jq empty "${sing}" && [[ $(jq "[.route.rules[]|select(.domain_regex)]|length" "${sing}") -eq 0 ]]'
+
+# --- 对接检测 ---
+xboard_check_config > "${V2BX_CONF_DIR}/check.out" 2>&1
+check "xboard_check_config 通过" '[[ $? -eq 0 ]]' || cat "${V2BX_CONF_DIR}/check.out"
+
+exit ${fail}

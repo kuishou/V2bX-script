@@ -1,5 +1,7 @@
 # V2bX 一键安装脚本（自托管 · 兼容性优化版）
 
+> 🔐 **对接 Xboard 的审计结论与安全部署方案：[docs/XBOARD.md](docs/XBOARD.md)**
+>
 > 📖 **新手请先看：[详细安装教程（docs/INSTALL.md）](docs/INSTALL.md)** —— 包含面板准备、各系统前置步骤、安装交互说明、配置文件示例、管理命令与常见问题排查。
 
 本项目源自 [wyx2685/V2bX-script](https://github.com/wyx2685/V2bX-script)（感谢原作者），现已**完全自托管、由本人维护**：
@@ -72,6 +74,11 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 ## 相对上游的改动
 
 - **完全自托管**：所有下载地址集中在每个脚本顶部的 “Repository constants” 常量块（`REPO_OWNER`、`SCRIPT_REPO`、`SCRIPT_BRANCH`、`CORE_REPO`），改一处即可；移除 `api.v-50.me` 统计请求；首次安装的教程链接指向本仓库文档。
+- **Xboard 对接**：配置向导每添加一个节点都会实时请求 Xboard 校验面板地址 / 通讯密钥 / 节点 ID / 协议，并根据面板下发的 TLS 设置自动决定是否需要证书；新增 `V2bX check` 随时检测所有节点。修复了 sing 节点 `EnableTFO`、`ReportMinTraffic` 等键名错误（原先被静默忽略）；`sing_origin.json` 加入 sniff 动作，使屏蔽 BT 等按协议匹配的规则真正生效（V2bX 的 sing 内核不使用 `EnableSniff`，嗅探只由该文件的路由规则决定）。详见 [docs/XBOARD.md](docs/XBOARD.md)。
+- **密钥保护**：`/etc/V2bX` 700、配置文件 600（Xboard 通讯密钥对所有节点通用）；面板地址强制 `https://`；密钥输入不回显、不出现在命令行。
+- **安装原子化**：在暂存目录中下载、校验、解压，成功后才替换现有安装；`.dgst` 缺失默认中止。
+- **systemd 沙箱**：`NoNewPrivileges`、`ProtectSystem=full`、只允许写 `/etc/V2bX` 与 `/usr/local/V2bX`、收缩能力集（`V2BX_HARDEN=0` 可关闭）。
+- **防火墙**：菜单 16 由「关闭防火墙、清空 iptables」改为「放行指定端口」。
 - **TLS**：去掉 `--no-check-certificate`，始终校验证书；证书错误时不再自动跳过校验，只有显式设置 `V2BX_INSECURE=1` 才跳过校验重试一次（系统 CA 过旧时使用，不推荐）。
 - **完整性校验**：下载 `V2bX-linux-<arch>.zip` 后用同一 Release 的 `.zip.dgst` 校验 SHA-256，不匹配立即中止；菜单 11 的第三方 BBR 脚本固定到指定 commit 并校验 SHA-256，运行前需确认；菜单 16（关闭防火墙）运行前需确认。管理脚本 / 安装脚本先下载到临时文件，下载失败不会覆盖已有的 `/usr/bin/V2bX`。
 
@@ -96,10 +103,12 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 | --- | --- |
 | `install.sh` | 一键安装 / 更新脚本 |
 | `V2bX.sh` | 管理脚本（安装为 `/usr/bin/V2bX`、`/usr/bin/v2bx`） |
-| `initconfig.sh` | 首次安装时的配置生成向导（被 `install.sh` 下载并 source） |
+| `initconfig.sh` | 配置生成向导与 Xboard 对接检测（安装到 `/usr/local/V2bX/initconfig.sh`，被 `install.sh` 与 `V2bX generate/check` source） |
 | `docs/INSTALL.md` | 详细安装教程 |
 | `docs/MAINTAIN.md` | 维护说明 |
+| `docs/XBOARD.md` | 深度审计结论与 Xboard 安全对接方案 |
 | `tests/smoke.sh` | 冒烟测试 |
+| `tests/initconfig.sh` + `tests/xboard_mock.py` | 配置向导与 Xboard 对接的离线端到端测试 |
 
 ## 测试
 

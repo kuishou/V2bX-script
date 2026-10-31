@@ -228,36 +228,36 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 首次安装完成后，屏幕会打印管理命令的用法，然后出现：
 
 ```text
-检测到你为第一次安装V2bX,是否自动直接生成配置文件？(y/n):
+检测到你为第一次安装V2bX,是否立即生成对接 Xboard 的配置文件？(y/n):
 ```
 
 - 输入 **`n`**：安装结束。此时 `/etc/V2bX/config.json` 只是一个 **示例配置**（`ApiHost` 为 `http://127.0.0.1`、`ApiKey` 为 `test`），服务没有启动。请按 [第 5 节](#5-配置文件-etcv2bxconfigjson) 手动修改后执行 `V2bX start`，或之后随时运行 `V2bX generate` 进入向导。
-- 输入 **`y`**：进入配置生成向导（与 `V2bX generate` 相同），依次询问：
+- 输入 **`y`**：进入配置生成向导（与 `V2bX generate` 相同）。**每添加一个节点，向导都会实时请求 Xboard 校验面板地址、通讯密钥、节点 ID 和协议**，并根据面板下发的配置自动判断是否需要证书：
 
 | 步骤 | 提示文字 | 怎么填 |
 | --- | --- | --- |
-| 1 | `V2bX 配置文件生成向导 … 使用此功能生成的配置文件会自带审计，确定继续？(y/n)` | 输入 `y` 或直接回车继续；以 `n` 开头的输入会退出。生成后旧配置会备份为 `/etc/V2bX/config.json.bak` |
-| 2 | `请输入机场网址(https://example.com)：` | 面板地址，即 `ApiHost`，如 `https://你的面板域名` |
-| 3 | `请输入面板对接API Key：` | 面板的 **通讯密钥**，即 `ApiKey` |
-| 4 | `是否设置固定的机场网址和API Key？(y/n)` | 选 `y` 则后面添加的节点都用同一个面板地址和密钥，不再重复询问 |
-| 5 | `请选择节点核心类型：1. xray 2. singbox 3. hysteria2` | 选择内核。Hysteria/TUIC/AnyTLS 只在 **singbox** 下可选；选 **hysteria2** 内核时协议自动为 Hysteria2 |
-| 6 | `请输入节点Node ID：` | 面板中的节点 ID（必须是数字） |
-| 7 | `请选择节点传输协议：` | `1` Shadowsocks、`2` Vless、`3` Vmess、`4` Hysteria、`5` Hysteria2、`6` Trojan、`7` Tuic、`8` AnyTLS（4/5/7/8 视所选内核显示）。**必须与面板中节点的协议一致** |
-| 8 | `请选择是否为reality节点？(y/n)` | 仅 VLESS 会问。Reality 节点选 `y`（不需要证书） |
-| 9 | `请选择是否进行TLS配置？(y/n)` | 非 Reality 的 Shadowsocks/VLESS/VMess/Trojan 会问；Hysteria/Hysteria2/TUIC/AnyTLS 自动视为需要 TLS |
-| 10 | `请选择证书申请模式：1. http 2. dns 3. self` | 见下方说明 |
-| 11 | `请输入节点证书域名(example.com)：` | 证书域名，如 `node.example.com` |
-| 12 | `是否继续添加节点配置？(回车继续，输入n或no退出)` | 一个 V2bX 可以同时对接多个节点；不再添加就输入 `n` |
+| 1 | `确定继续? [Y/n]` | 回车继续。旧配置会备份为 `config.json.bak.<时间>`（保留最近 5 份） |
+| 2 | `请输入 Xboard 面板地址` | 面板根地址，如 `https://xboard.example.com`。**必须是 https://**（本机 `http://127.0.0.1` 除外），结尾的 `/` 会自动去掉 |
+| 3 | `请输入通讯密钥（输入不回显）` | Xboard「系统配置 → 服务端 → 通讯密钥」（≥16 位） |
+| 4 | `后续节点是否使用相同的面板地址和通讯密钥?` | 一般回车（是） |
+| 5 | `请选择节点核心类型：1. xray 2. singbox 3. hysteria2` | Hysteria/TUIC/AnyTLS 只能用 **singbox**；选 **hysteria2** 内核时协议自动为 Hysteria2 |
+| 6 | `请输入 Xboard 节点 ID` | 面板「节点管理」中的节点 ID |
+| 7 | `请选择节点协议` | 必须与面板中节点协议一致。Xboard 的 Hysteria 节点：版本 1 选 Hysteria，版本 2 选 Hysteria2 |
+| 8 | `正在检测 Xboard 对接…` | 自动完成。失败时会说明原因（密钥错误 / 节点不存在或协议不符 / 404 地址错误 / 被 CDN 拦截等），可选择仍然继续 |
+| 9 | `请选择证书模式` | 仅需要证书时出现（Trojan/VMess/VLESS 开启 TLS、Hysteria/TUIC/AnyTLS）；Reality 与 Shadowsocks 自动跳过。证书域名默认取面板中的 `server_name` |
+| 10 | `是否继续添加节点?` | 一个 V2bX 可以同时对接多个节点 |
+| 11 | `是否额外启用原版域名审计列表?` | 默认否，见下方说明 |
 
 证书模式说明：
 
-- **1. http**：自动申请证书，要求域名已正确解析到本机且 **80 端口可用**。
-- **2. dns**：通过 DNS 服务商 API 自动申请。向导会提示「请手动修改配置文件后重启V2bX！」——需要你手动在 `config.json` 中填写 `Provider` 和 `DNSEnv`（见 [5.3](#53-证书配置-certconfig)）。
-- **3. self**：使用自己的证书文件（默认路径 `/etc/V2bX/fullchain.cer` 和 `/etc/V2bX/cert.key`），路径下没有文件时使用自签名证书。同样需要手动检查配置后重启。
+- **1. http**：自动申请，要求域名已解析到本机且 **80 端口可用**。
+- **2. dns**（推荐）：通过 DNS 服务商 API 自动申请，向导会直接询问凭据。Cloudflare 请使用仅有 `Zone.DNS` 编辑权限的 **API Token**（`CF_DNS_API_TOKEN`），不要用 Global API Key；其它服务商按 [lego 文档](https://go-acme.github.io/lego/dns/) 输入变量名和值。
+- **3. file**：使用已有的证书文件（默认 `/etc/V2bX/fullchain.cer`、`/etc/V2bX/cert.key`）。
+- **4. self**：自动生成自签名证书，客户端需允许不安全证书，不推荐。
 
-向导完成后会生成：`/etc/V2bX/config.json`、`custom_outbound.json`、`route.json`、`sing_origin.json`、`hy2config.yaml`，并自动 **重启 V2bX**。
+向导完成后会生成：`/etc/V2bX/config.json`、`dns.json`、`custom_outbound.json`、`route.json`、`sing_origin.json`、`hy2config.yaml`（均为 600 权限，目录 700；出站的 IPv4 / IPv6 策略按服务器是否有公网 IPv6 自动选择），并自动 **重启 V2bX**。之后可随时用 `V2bX check` 再次检测所有节点的对接状态。
 
-> 向导生成的 `route.json` / `sing_origin.json` 带有一份默认的审计（屏蔽）规则，例如屏蔽内网 IP、BT 下载等。如有需要可自行编辑这些文件。
+> 本地审计规则默认只阻断 **内网 / 回环地址**（防止用户借节点访问服务器内网或云厂商元数据接口 169.254.169.254）和 **BT 下载**。原版那份大而全的域名屏蔽列表（会屏蔽 gov / bank / taobao / 360 等）改为可选；更推荐在 Xboard「路由管理」中按节点统一下发审计规则。
 
 ---
 
@@ -288,8 +288,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
                 "Level": "error",
                 "ErrorPath": "/etc/V2bX/error.log"
             },
+            "DnsConfigPath": "/etc/V2bX/dns.json",
             "OutboundConfigPath": "/etc/V2bX/custom_outbound.json",
-            "RouteConfigPath": "/etc/V2bX/route.json"
+            "RouteConfigPath": "/etc/V2bX/route.json",
+            "XrayConnectionConfig": {
+                "handshake": 4,
+                "connIdle": 300,
+                "uplinkOnly": 2,
+                "downlinkOnly": 5,
+                "bufferSize": 64
+            }
         }
     ],
     "Nodes": [
@@ -303,11 +311,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
             "ListenIP": "0.0.0.0",
             "SendIP": "0.0.0.0",
             "DeviceOnlineMinTraffic": 200,
-            "MinReportTraffic": 0,
+            "ReportMinTraffic": 0,
             "EnableProxyProtocol": false,
             "EnableUot": true,
             "EnableTFO": true,
-            "DNSType": "UseIPv4",
             "CertConfig": {
                 "CertMode": "none",
                 "RejectUnknownSni": false,
@@ -358,9 +365,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
             "ListenIP": "0.0.0.0",
             "SendIP": "0.0.0.0",
             "DeviceOnlineMinTraffic": 200,
-            "MinReportTraffic": 0,
-            "TCPFastOpen": false,
-            "SniffEnabled": true,
+            "ReportMinTraffic": 0,
+            "EnableTFO": false,
             "CertConfig": {
                 "CertMode": "http",
                 "RejectUnknownSni": false,
@@ -385,7 +391,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 
 | 字段 | 说明 |
 | --- | --- |
-| `CertMode` | `none`：不使用 TLS（Shadowsocks、Reality 节点用这个）；`http`：通过 HTTP 自动申请，需要 **80 端口**；`dns`：通过 DNS 服务商 API 自动申请；`self`：使用 `CertFile`/`KeyFile` 指定的证书，路径下没有文件时使用自签名证书 |
+| `CertMode` | `none`：不使用 TLS（Shadowsocks、Reality 节点用这个）；`http`：通过 HTTP 自动申请，需要 **80 端口**；`dns`：通过 DNS 服务商 API 自动申请；`file`：使用 `CertFile`/`KeyFile` 指定的已有证书；`self`：路径下没有文件时自动生成自签名证书 |
 | `CertDomain` | 证书域名，应与面板中节点地址/SNI 使用的域名一致，例如 `node.example.com` |
 | `CertFile` / `KeyFile` | 证书和私钥路径。`self` 模式下请把你的证书放到这里；自动申请的证书也会保存到这里 |
 | `Email` | 申请证书时使用的邮箱 |
@@ -460,8 +466,9 @@ V2bX
 | 13 | 生成 X25519 密钥（Reality 节点用） |
 | 14 | 升级 V2bX 维护脚本（重新下载 `/usr/bin/V2bX`） |
 | 15 | 生成 V2bX 配置文件（配置向导） |
-| 16 | 放行 VPS 的所有网络端口（⚠️ 会停用 firewalld / ufw、关闭 SELinux、清空 iptables 规则，请慎用） |
-| 17 | 退出脚本 |
+| 16 | 放行指定端口（TCP+UDP，自动识别 ufw / firewalld / iptables，只添加规则，不关闭防火墙） |
+| 17 | 检测 Xboard 对接（逐个请求 config.json 中节点的 UniProxy 接口） |
+| 18 | 退出脚本 |
 
 ### 6.2 子命令
 
@@ -475,7 +482,9 @@ V2bX enable       - 设置 V2bX 开机自启
 V2bX disable      - 取消 V2bX 开机自启
 V2bX log          - 查看 V2bX 日志
 V2bX x25519       - 生成 x25519 密钥
-V2bX generate     - 生成 V2bX 配置文件
+V2bX generate     - 生成 V2bX 配置文件（对接 Xboard）
+V2bX check        - 检测与 Xboard 的对接
+V2bX open_ports   - 放行指定端口
 V2bX update       - 更新 V2bX
 V2bX update x.x.x - 安装 V2bX 指定版本
 V2bX install      - 安装 V2bX
@@ -602,8 +611,9 @@ V2bX version      - 查看 V2bX 版本
 ### 8.4 证书错误
 
 - **http 模式** 申请失败：域名是否已解析到本机公网 IP（`ping node.example.com`）；**80 端口** 是否被 Nginx/Apache 等占用（`ss -lntp | grep ':80 '`）且防火墙/安全组已放行。
-- **dns 模式**：`Provider` 和 `DNSEnv` 是否已按 <https://go-acme.github.io/lego/dns/> 填写正确（向导生成的 `"EnvName": "env1"` 只是占位）。
-- **self 模式**：`CertFile` / `KeyFile` 路径下是否有正确的证书和私钥；证书域名需与 `CertDomain` 及客户端 SNI 一致。
+- **dns 模式**：`Provider` 和 `DNSEnv` 是否已按 <https://go-acme.github.io/lego/dns/> 填写正确（旧版向导生成的 `"EnvName": "env1"` 只是占位，需要改成真实变量）。
+- **file 模式**：`CertFile` / `KeyFile` 路径下是否有正确的证书和私钥；证书域名需与 `CertDomain` 及客户端 SNI 一致。
+- **证书放在 /etc/V2bX 以外的目录、且使用 http/dns 自动申请**：systemd 沙箱只允许 V2bX 写 `/etc/V2bX` 和 `/usr/local/V2bX`，请把 `CertFile`/`KeyFile` 放到 `/etc/V2bX` 下，或执行 `systemctl edit V2bX` 追加 `ReadWritePaths=你的目录`。
 - 配置是否用错：Shadowsocks 和 VLESS Reality 节点应使用 `"CertMode": "none"`。
 
 ### 8.5 节点不在线 / 日志中报 API 错误
@@ -615,13 +625,16 @@ V2bX version      - 查看 V2bX 版本
 - `NodeID`：是面板节点列表中的 ID，**纯数字，不加引号**。
 - `NodeType`：必须与面板中该节点的协议一致，例如面板建的是 Trojan 节点，这里就必须是 `trojan`。
 
-可以在服务器上直接请求面板接口来测试（V2bX 使用的就是这个接口，参数换成你自己的）：
+最简单的办法是运行 **`V2bX check`**：它会逐个请求 config.json 中各节点的 Xboard 接口（通讯密钥不会出现在命令行和输出里），并给出具体原因：
 
-```bash
-curl -s "https://你的面板域名/api/v1/server/UniProxy/config?node_type=vless&node_id=1&token=你的通讯密钥"
-```
+| 提示 | 原因 |
+| --- | --- |
+| 通讯密钥错误 | `ApiKey` 与 Xboard「通讯密钥」不一致 |
+| 节点不存在 | `NodeID` 不存在，或 `NodeType` 与面板协议不符（Hysteria2 在 Xboard 中是「Hysteria 节点 + 版本 2」） |
+| 接口不存在 (404) | `ApiHost` 不是 Xboard 站点根地址 |
+| 请求被拒绝 (403/503)、或返回 200 但不是节点配置 | 被 Cloudflare / WAF 拦截：为节点 IP 放行，或让 `ApiHost` 直连源站 |
 
-能返回节点配置的 JSON 说明这四项都对；返回错误信息则按提示检查对应项。
+`V2bX check` 需要 `jq` 或 `python3` 解析配置。
 
 - 手写 sing 配置后启动失败并提示 `read original config error`：见 [5.2](#52-示例sing-内核singbox节点) 的注意事项。
 - 修改配置后忘了重启：执行 `V2bX restart`。

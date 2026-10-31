@@ -18,11 +18,14 @@
 ```text
 install.sh        一键安装/更新脚本（V2bX update / install 也是调用它）
 V2bX.sh           管理脚本，安装到 /usr/bin/V2bX（以及软链接 /usr/bin/v2bx）
-initconfig.sh     首次安装时的配置生成向导，install.sh 下载后 source 并调用 generate_config_file
+initconfig.sh     配置生成向导 + Xboard 对接检测（唯一的生成逻辑来源），安装到 /usr/local/V2bX/initconfig.sh，
+                  install.sh 首次安装与 V2bX generate / check 都 source 它
+docs/XBOARD.md    深度审计结论与 Xboard 安全对接方案
 docs/INSTALL.md   安装教程（给用户看）
 docs/MAINTAIN.md  本文件（给维护者看）
 tests/smoke.sh    冒烟测试（只加载函数，测试系统识别等，不真正安装）
 tests/checksum.sh 离线测试 SHA-256 校验（正确 / 篡改 / 两种 .dgst 格式）
+tests/initconfig.sh + tests/xboard_mock.py  向导与 Xboard 对接的离线端到端测试
 ```
 
 脚本之间的调用关系：
@@ -33,7 +36,8 @@ tests/checksum.sh 离线测试 SHA-256 校验（正确 / 篡改 / 两种 .dgst �
   ├─ GET https://github.com/liusu2100-sys/V2bX/releases/download/<tag>/V2bX-linux-<arch>.zip
   │     （zip 内含 V2bX 程序、geoip.dat、geosite.dat、示例 json 配置）
   ├─ GET raw.githubusercontent.com/liusu2100-sys/V2bX-script/main/V2bX.sh      → /usr/bin/V2bX
-  └─ (首次安装且选择生成配置) GET .../main/initconfig.sh
+  └─ GET .../main/initconfig.sh                                                → /usr/local/V2bX/initconfig.sh
+  （以上全部先放在 /usr/local/.V2bX-stage.* 暂存目录，校验、解压成功后才替换 /usr/local/V2bX）
 
 V2bX update / V2bX install   → 下载并运行本仓库 main 分支的 install.sh
 V2bX update_shell            → 重新下载本仓库 main 分支的 V2bX.sh
@@ -171,11 +175,13 @@ CORE_REPO="${V2BX_CORE_REPO:-${REPO_OWNER}/V2bX}"              # 程序仓库（
 | 一键安装入口 `bash <(curl -Ls …/V2bX-script/main/install.sh)` | 安装 | 用户手动执行 | 中（curl\|bash，以 root 运行 `main` 分支最新内容） | 只来自本仓库，HTTPS；信任根是本仓库的写权限（保护好 GitHub 账号 / 开启 2FA）。谨慎用户可先 `curl -o install.sh …` 查看后再 `bash install.sh`。 |
 | `raw.githubusercontent.com/…/V2bX-script/main/{V2bX.sh,initconfig.sh,install.sh}` | 管理脚本、配置向导；`V2bX update/install/update_shell` 重新下载 | 安装 / 更新 / 首次生成配置 | 中（跟随 `main` 分支，无单独校验） | 同源于本仓库，HTTPS + 证书校验；先下载到临时文件，失败不覆盖已有文件。 |
 | `api.github.com/repos/liusu2100-sys/V2bX/releases/latest` | 获取最新版本号 | 安装 / 更新（未指定版本时） | 低 | HTTPS；只取 tag 名。 |
-| `github.com/liusu2100-sys/V2bX/releases/download/<tag>/V2bX-linux-<arch>.zip` + `.zip.dgst` | V2bX 程序 + geoip/geosite + 示例配置 | 安装 / 更新 | 低（已修复） | **解压前用 `.dgst` 中的 SHA-256 校验，不匹配立即中止（fail closed）**；`.dgst` 缺失时警告并继续，设 `V2BX_REQUIRE_CHECKSUM=1` 则中止。校验工具依次尝试 `sha256sum`（coreutils / busybox）、`shasum -a 256`、`openssl dgst -sha256`，都没有则中止。注意 `.dgst` 与 zip 同在一个 Release，只能防传输损坏 / CDN 或镜像篡改，不能防 Release 本身被替换。 |
+| `github.com/liusu2100-sys/V2bX/releases/download/<tag>/V2bX-linux-<arch>.zip` + `.zip.dgst` | V2bX 程序 + geoip/geosite + 示例配置 | 安装 / 更新 | 低（已修复） | **解压前用 `.dgst` 中的 SHA-256 校验，不匹配立即中止（fail closed）**；`.dgst` 缺失时默认也中止，设 `V2BX_REQUIRE_CHECKSUM=0` 才放行。校验工具依次尝试 `sha256sum`（coreutils / busybox）、`shasum -a 256`、`openssl dgst -sha256`，都没有则中止。注意 `.dgst` 与 zip 同在一个 Release，只能防传输损坏 / CDN 或镜像篡改，不能防 Release 本身被替换。 |
 | TLS 证书 | 所有下载 | 始终 | 低（已修复） | 以前证书错误时会自动 `--no-check-certificate` / `curl -k` 重试（可被中间人利用），**现已改为默认不重试**；只有显式设置 `V2BX_INSECURE=1` 才跳过校验重试一次（zip 仍会做 SHA-256 校验）。 |
 | 系统软件源（yum/dnf/apt/apk/pacman）、`epel-release` | 安装 wget curl unzip tar cron socat ca-certificates | 安装 | 低 | 发行版官方源，包有 GPG 签名；EPEL 来自 CentOS extras 源（已签名）。EOL 系统需自行切换归档源。 |
 | ylx2016/Linux-NetSpeed `tcpx.sh` | 菜单 11「一键安装 bbr」 | 仅用户选择菜单 11 时 | **高**（第三方 root 脚本，会换内核） | **已固定到 commit `dc2197d4dcb7…` 并校验 SHA-256 `7d0cb5cd…`**，下载到临时文件，显示风险说明，需输入 `y` 确认才运行。自定义 `V2BX_BBR_SCRIPT_URL` 时可配 `V2BX_BBR_SCRIPT_SHA256`，否则提示“未校验”。脚本自身的剩余风险见 5.2。 |
-| 菜单 16「放行所有端口」 | 关闭 firewalld/ufw、`setenforce 0`、清空 iptables | 仅用户选择菜单 16 时 | 高（本机失去防火墙） | 功能保留，**新增风险说明 + 确认（默认 n）**。建议只放行节点端口。 |
+| 菜单 16「放行指定端口」 | 添加 ufw / firewalld / iptables 放行规则 | 仅用户选择菜单 16 时 | 低 | 已替换原先「关闭防火墙、`setenforce 0`、清空 iptables」的实现；只追加 TCP+UDP 规则、幂等、不改默认策略。 |
+| Xboard 通讯密钥（`/etc/V2bX/config.json`） | 节点对接 | 始终 | **高**（全局密钥，泄露即可拉取所有用户） | 目录 700 / 文件 600、systemd `UMask=0077`；面板地址强制 HTTPS；对接检测通过 `curl -K -` 传参。面板侧加固见 [XBOARD.md](XBOARD.md) 第 3 节。 |
+| systemd 沙箱 | 限制 V2bX 进程 | 始终 | — | `install.sh` 的 `systemd_hardening` 按 systemd 版本生成；`V2BX_HARDEN=0` 关闭。 |
 | 证书申请（V2bX 内置 lego → Let's Encrypt / DNS 服务商 API） | 节点 TLS 证书 | `CertMode` 为 `http`/`dns` 时 | 低 | V2bX 程序内部完成，HTTPS；DNS API 密钥保存在 `/etc/V2bX/config.json`（仅 root 可读为宜）。 |
 | GitHub Actions：`actions/checkout`、`actions/setup-go`、`actions/upload-artifact`、`actions/download-artifact`、`docker/*-action`、`github/codeql-action` | V2bX 仓库构建 / 发布 / Docker 镜像 / CodeQL | CI | 低（已修复） | **全部固定到完整 commit SHA**（行尾注释写版本）；Docker 工作流 `permissions: contents: read, packages: write`；`steps.meta.outputs.json` 改为通过环境变量传入脚本（避免注入）；CodeQL 从已退役的 v2 升到 v3。 |
 | Go 工具链（`actions/setup-go` 下载，自带校验）与 Go 模块（`proxy.golang.org`） | 编译 V2bX | CI 构建时 | 低 | 版本锁定在 `go.mod` / `go.sum`，`go mod download` 会对照 `go.sum` 与 sum.golang.org 校验。Go 从 1.25.0 升到 **1.25.14**（包含此后的标准库安全修复）。 |
@@ -203,7 +209,9 @@ CORE_REPO="${V2BX_CORE_REPO:-${REPO_OWNER}/V2bX}"              # 程序仓库（
 | 变量 | 默认 | 作用 |
 | --- | --- | --- |
 | `V2BX_INSECURE=1` | 关 | 证书错误时允许跳过 TLS 校验重试一次（不推荐，仅用于 CA 证书过旧的 EOL 系统）。 |
-| `V2BX_REQUIRE_CHECKSUM=1` | 关 | Release 缺少 `.dgst` 时中止安装（默认只警告）。 |
+| `V2BX_REQUIRE_CHECKSUM=0` | 强制校验 | Release 缺少 `.dgst` 时仍继续安装（默认中止，不推荐关闭）。 |
+| `V2BX_HARDEN=0` | 开 | 安装时不写入 systemd 沙箱指令。 |
+| `V2BX_ALLOW_HTTP=1` | 关 | 配置向导允许 `http://` 面板地址（通讯密钥明文传输，仅内网）。 |
 | `V2BX_BBR_SCRIPT_URL` / `V2BX_BBR_SCRIPT_SHA256` | 内置固定值 | 替换菜单 11 的 BBR 脚本地址及其 SHA-256。 |
 
 ### 5.4 GitHub Actions 版本升级
@@ -226,6 +234,8 @@ shellcheck -S error install.sh V2bX.sh initconfig.sh
 grep -n 'wyx2685' install.sh V2bX.sh initconfig.sh   # 只允许出现在注释里（致谢）
 docker run --rm -v "$PWD":/t:ro debian:12 bash /t/tests/smoke.sh /t/install.sh
 docker run --rm -v "$PWD":/t:ro debian:12 bash /t/tests/checksum.sh /t/install.sh
+docker run --rm -v "$PWD":/t:ro python:3.12-slim bash -c 'apt-get update -qq && apt-get install -y -qq curl jq >/dev/null; bash /t/tests/initconfig.sh /t/initconfig.sh'
+docker run --rm -v "$PWD":/t:ro bash:4.2 bash -c 'apk add -q curl jq python3; bash /t/tests/initconfig.sh /t/initconfig.sh'   # CentOS 7 同版本 bash
 grep -nE 'no-check-certificate|curl -k|bash <\(curl' install.sh V2bX.sh initconfig.sh   # 只允许出现在 V2BX_INSECURE 分支和注释里
 git push origin main
 ```
