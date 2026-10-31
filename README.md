@@ -17,7 +17,7 @@
 
 ## 快速开始
 
-1. 在面板（Xboard / V2board）后台新建节点，记下 **面板地址**、**通讯密钥**、**节点 ID** 和 **节点协议**。
+1. 在面板（Xboard / V2board）后台新建节点，记下 **面板地址**、**通讯密钥**、**节点 ID** 和 **节点协议**。新版 Xboard 也可以改用更安全的 **机器令牌**（记下机器 ID 与令牌，见下文「Xboard 机器令牌」）。
 2. 以 root 身份在 VPS 上执行（Alpine 需先 `apk add bash curl`）：
 
    ```bash
@@ -28,6 +28,20 @@
 4. 用 `V2bX status` / `V2bX log` 检查运行状态，并在面板中确认节点在线。
 
 详细步骤与排错见 [docs/INSTALL.md](docs/INSTALL.md)。
+
+### Xboard 机器令牌
+
+向导在填写面板地址后会询问鉴权方式：
+
+- **1. 全局通讯密钥**（默认，直接回车）：与以前完全相同，走 `/api/v1/server/UniProxy/*`。
+- **2. 机器令牌**：在 Xboard 后台的机器管理中为这台服务器创建机器、绑定并启用节点，然后在向导中填写 **机器 ID** 和 **令牌**。生成的节点配置写入 `"MachineID": <机器 ID>`，`ApiKey` 为机器令牌，V2bX 改走 `/api/v2/server/*`。令牌只能访问绑定在该机器上的节点，泄露时在面板中停用或重置这一台即可。
+
+使用机器令牌的前提：
+
+- V2bX 核心需包含 [liusu2100-sys/V2bX PR #1](https://github.com/liusu2100-sys/V2bX/pull/1)（分支 `feat/xboard-machine-token`，提交 `b1e8646`）且**已发布新版本**；旧版核心会忽略 `MachineID`，导致对接失败。
+- `NodeID` 必须是节点的**数字 ID**，不支持节点 code。
+
+向导和 `V2bX check` 会请求 `/api/v2/server/config` 校验，并区分机器令牌错误、机器已停用、节点未绑定到该机器或未启用。详见 [docs/XBOARD.md](docs/XBOARD.md#11-机器令牌推荐)。
 
 ## 支持的系统
 
@@ -74,8 +88,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 ## 相对上游的改动
 
 - **完全自托管**：所有下载地址集中在每个脚本顶部的 “Repository constants” 常量块（`REPO_OWNER`、`SCRIPT_REPO`、`SCRIPT_BRANCH`、`CORE_REPO`），改一处即可；移除 `api.v-50.me` 统计请求；首次安装的教程链接指向本仓库文档。
-- **Xboard 对接**：配置向导每添加一个节点都会实时请求 Xboard 校验面板地址 / 通讯密钥 / 节点 ID / 协议，并根据面板下发的 TLS 设置自动决定是否需要证书；新增 `V2bX check` 随时检测所有节点。修复了 sing 节点 `EnableTFO`、`ReportMinTraffic` 等键名错误（原先被静默忽略）；`sing_origin.json` 加入 sniff 动作，使屏蔽 BT 等按协议匹配的规则真正生效（V2bX 的 sing 内核不使用 `EnableSniff`，嗅探只由该文件的路由规则决定）。详见 [docs/XBOARD.md](docs/XBOARD.md)。
-- **密钥保护**：`/etc/V2bX` 700、配置文件 600（Xboard 通讯密钥对所有节点通用）；面板地址强制 `https://`；密钥输入不回显、不出现在命令行。
+- **Xboard 对接**：配置向导每添加一个节点都会实时请求 Xboard 校验面板地址 / 通讯密钥 / 节点 ID / 协议，并根据面板下发的 TLS 设置自动决定是否需要证书；新增 `V2bX check` 随时检测所有节点；支持 Xboard 机器令牌（`MachineID` + `/api/v2/server/*`）。修复了 sing 节点 `EnableTFO`、`ReportMinTraffic` 等键名错误（原先被静默忽略）；`sing_origin.json` 加入 sniff 动作，使屏蔽 BT 等按协议匹配的规则真正生效（V2bX 的 sing 内核不使用 `EnableSniff`，嗅探只由该文件的路由规则决定）。详见 [docs/XBOARD.md](docs/XBOARD.md)。
+- **密钥保护**：`/etc/V2bX` 700、配置文件 600（Xboard 通讯密钥对所有节点通用，推荐改用只对本机节点有效的机器令牌）；面板地址强制 `https://`；密钥输入不回显、不出现在命令行。
 - **安装原子化**：在暂存目录中下载、校验、解压，成功后才替换现有安装；`.dgst` 缺失默认中止。
 - **systemd 沙箱**：`NoNewPrivileges`、`ProtectSystem=full`、只允许写 `/etc/V2bX` 与 `/usr/local/V2bX`、收缩能力集（`V2BX_HARDEN=0` 可关闭）。
 - **防火墙**：菜单 16 由「关闭防火墙、清空 iptables」改为「放行指定端口」。
