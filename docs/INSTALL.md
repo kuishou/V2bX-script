@@ -238,15 +238,23 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 | --- | --- | --- |
 | 1 | `确定继续? [Y/n]` | 回车继续。旧配置会备份为 `config.json.bak.<时间>`（保留最近 5 份） |
 | 2 | `请输入 Xboard 面板地址` | 面板根地址，如 `https://xboard.example.com`。**必须是 https://**（本机 `http://127.0.0.1` 除外），结尾的 `/` 会自动去掉 |
-| 3 | `请输入通讯密钥（输入不回显）` | Xboard「系统配置 → 服务端 → 通讯密钥」（≥16 位） |
-| 4 | `后续节点是否使用相同的面板地址和通讯密钥?` | 一般回车（是） |
-| 5 | `请选择节点核心类型：1. xray 2. singbox 3. hysteria2` | Hysteria/TUIC/AnyTLS 只能用 **singbox**；选 **hysteria2** 内核时协议自动为 Hysteria2 |
-| 6 | `请输入 Xboard 节点 ID` | 面板「节点管理」中的节点 ID |
-| 7 | `请选择节点协议` | 必须与面板中节点协议一致。Xboard 的 Hysteria 节点：版本 1 选 Hysteria，版本 2 选 Hysteria2 |
-| 8 | `正在检测 Xboard 对接…` | 自动完成。失败时会说明原因（密钥错误 / 节点不存在或协议不符 / 404 地址错误 / 被 CDN 拦截等），可选择仍然继续 |
-| 9 | `请选择证书模式` | 仅需要证书时出现（Trojan/VMess/VLESS 开启 TLS、Hysteria/TUIC/AnyTLS）；Reality 与 Shadowsocks 自动跳过。证书域名默认取面板中的 `server_name` |
-| 10 | `是否继续添加节点?` | 一个 V2bX 可以同时对接多个节点 |
-| 11 | `是否额外启用原版域名审计列表?` | 默认否，见下方说明 |
+| 3 | `请选择节点鉴权方式：1. 全局通讯密钥 2. 机器令牌` | 回车即 **1. 全局通讯密钥**（与以前完全相同）。**2. 机器令牌** 更安全，但需要 V2bX 核心支持，见下方说明 |
+| 4 | `请输入通讯密钥（输入不回显）` | Xboard「系统配置 → 服务端 → 通讯密钥」（≥16 位）。选机器令牌时改为先输入 **机器 ID**（正整数），再输入该机器的 **令牌**（不回显） |
+| 5 | `后续节点是否使用相同的面板地址和通讯密钥?` | 一般回车（是）。机器令牌模式下同一台服务器上的节点都属于同一台机器，也是回车 |
+| 6 | `请选择节点核心类型：1. xray 2. singbox 3. hysteria2` | Hysteria/TUIC/AnyTLS 只能用 **singbox**；选 **hysteria2** 内核时协议自动为 Hysteria2 |
+| 7 | `请输入 Xboard 节点 ID` | 面板「节点管理」中的节点 **数字 ID**（不支持节点 code） |
+| 8 | `请选择节点协议` | 必须与面板中节点协议一致。Xboard 的 Hysteria 节点：版本 1 选 Hysteria，版本 2 选 Hysteria2 |
+| 9 | `正在检测 Xboard 对接…` | 自动完成。失败时会说明原因（密钥错误 / 节点不存在或协议不符 / 机器令牌错误 / 机器已停用 / 节点未绑定到该机器 / 404 地址错误 / 被 CDN 拦截等），可选择仍然继续 |
+| 10 | `请选择证书模式` | 仅需要证书时出现（Trojan/VMess/VLESS 开启 TLS、Hysteria/TUIC/AnyTLS）；Reality 与 Shadowsocks 自动跳过。证书域名默认取面板中的 `server_name` |
+| 11 | `是否继续添加节点?` | 一个 V2bX 可以同时对接多个节点 |
+| 12 | `是否额外启用原版域名审计列表?` | 默认否，见下方说明 |
+
+机器令牌说明（鉴权方式选 2）：
+
+- 先在 Xboard 后台的机器管理中为这台服务器创建一台机器，把要部署的节点绑定到该机器并启用，记下 **机器 ID** 与 **令牌**。
+- 生成的节点配置为 `"ApiKey": "<机器令牌>"` 加上 `"MachineID": <机器 ID>`，V2bX 改用 `/api/v2/server/*` 接口，令牌只能访问绑定在该机器上的节点，可在面板中单独停用 / 重置。
+- **需要 V2bX 核心包含 [liusu2100-sys/V2bX PR #1](https://github.com/liusu2100-sys/V2bX/pull/1)（分支 `feat/xboard-machine-token`，提交 `b1e8646`）并已发布新版本**。旧版核心会忽略 `MachineID`，把机器令牌当作通讯密钥走 v1 接口，导致对接失败；在新版核心发布前请选 1。
+- 详见 [XBOARD.md 1.1 节](XBOARD.md#11-机器令牌推荐)。
 
 证书模式说明：
 
@@ -429,7 +437,8 @@ V2bX restart
 | config.json | 面板中的位置 / 含义 |
 | --- | --- |
 | `ApiHost` | 面板访问地址（如 `https://你的面板域名`）。V2bX 会请求 `ApiHost` + `/api/v1/server/UniProxy/...` |
-| `ApiKey` | 系统配置中的 **通讯密钥** |
+| `ApiKey` | 系统配置中的 **通讯密钥**；设置了 `MachineID` 时为该机器的 **令牌** |
+| `MachineID` | 可选。机器管理中的 **机器 ID**；大于 0 时改用 `/api/v2/server/...` 与机器令牌（需要支持该字段的 V2bX 核心），缺省或 0 为全局通讯密钥 |
 | `NodeID` | 节点管理中该节点的 **ID** |
 | `NodeType` | 节点的 **协议类型**（见 [1.2](#12-面板端xboard--v2board准备) 对照表） |
 | `Core` | 本机使用哪个内核运行该节点（`xray` / `sing` / `hysteria2`），必须在 `Cores` 中启用 |
@@ -622,7 +631,8 @@ V2bX version      - 查看 V2bX 版本
 
 - `ApiHost`：必须带 `http://` 或 `https://`，**末尾不要带 `/`**，且服务器能访问面板域名。
 - `ApiKey`：必须与面板「通讯密钥」**完全一致**（注意多余的空格）。
-- `NodeID`：是面板节点列表中的 ID，**纯数字，不加引号**。
+- `NodeID`：是面板节点列表中的 ID，**纯数字，不加引号**（机器令牌模式只支持数字 ID，不支持节点 code）。
+- `MachineID`（机器令牌模式）：机器 ID，纯数字；该节点必须绑定到这台机器并启用。
 - `NodeType`：必须与面板中该节点的协议一致，例如面板建的是 Trojan 节点，这里就必须是 `trojan`。
 
 最简单的办法是运行 **`V2bX check`**：它会逐个请求 config.json 中各节点的 Xboard 接口（通讯密钥不会出现在命令行和输出里），并给出具体原因：
@@ -631,7 +641,11 @@ V2bX version      - 查看 V2bX 版本
 | --- | --- |
 | 通讯密钥错误 | `ApiKey` 与 Xboard「通讯密钥」不一致 |
 | 节点不存在 | `NodeID` 不存在，或 `NodeType` 与面板协议不符（Hysteria2 在 Xboard 中是「Hysteria 节点 + 版本 2」） |
-| 接口不存在 (404) | `ApiHost` 不是 Xboard 站点根地址 |
+| 接口不存在 (404) | `ApiHost` 不是 Xboard 站点根地址；机器令牌模式下也可能是 Xboard 版本过旧、没有 `/api/v2/server` 接口 |
+| 机器 ID 或机器令牌错误 | `MachineID` 不存在，或 `ApiKey` 不是该机器当前的令牌（重置令牌后旧令牌立即失效） |
+| 机器已在 Xboard 中停用 | 在面板机器管理中启用该机器 |
+| 节点不在该机器上 | `NodeID` 不存在、没有绑定到这台机器，或节点未启用 |
+| 节点协议不符 | 机器令牌模式下面板不校验 `NodeType`，由脚本比对：`NodeType` 与面板中节点协议不一致 |
 | 请求被拒绝 (403/503)、或返回 200 但不是节点配置 | 被 Cloudflare / WAF 拦截：为节点 IP 放行，或让 `ApiHost` 直连源站 |
 
 `V2bX check` 需要 `jq` 或 `python3` 解析配置。

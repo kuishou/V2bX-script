@@ -24,6 +24,53 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 
 > **核心风险**：拿到通讯密钥 = 可以对任意节点 ID 调用 `UniProxy/user`，拉取整个机场所有用户的 UUID / 密码，还能伪造流量上报。所以密钥的存储、传输、日志都必须按"最高机密"处理。
 
+### 1.1 机器令牌（推荐）
+
+新版 Xboard 提供 **机器令牌**：在后台的机器管理中为每台服务器创建一台"机器"，把该服务器上的节点绑定到这台机器，即可得到 **机器 ID** 和该机器专属的 **令牌**（32 位随机串，可重置、可停用）。此时 V2bX 改走 v2 接口，查询参数为 `machine_id`、`node_id`、`token`（**不带 `node_type`**）：
+
+| 接口 | 方法 | 作用 |
+| --- | --- | --- |
+| `/api/v2/server/config` | GET | 拉取节点配置（与 v1 内容相同） |
+| `/api/v2/server/user` | GET | 拉取可用用户 |
+| `/api/v2/server/push` | POST | 上报流量 |
+| `/api/v2/server/alive` / `alivelist` | POST / GET | 在线 IP 上报 / 设备数限制 |
+
+鉴权（Xboard `app/Http/Middleware/ServerV2.php`）：
+
+| 情况 | 面板返回 | 脚本提示 |
+| --- | --- | --- |
+| 机器 ID 不存在或令牌不匹配 | 401 `Machine not found or invalid token` | 机器 ID 或机器令牌错误 |
+| 机器已停用 | 403 `Machine is disabled` | 机器已在 Xboard 中停用 |
+| 节点不存在、未绑定到该机器或未启用 | 400 `Node not found on this machine` | 节点不在该机器上 |
+
+与全局通讯密钥相比：
+
+- **泄露范围小**：一台服务器被攻破，只能访问绑定在这台机器上的节点，拿不到其他节点的用户；
+- **可单独处置**：怀疑泄露时在面板中停用该机器或重置其令牌即可，不必轮换全局密钥、改动所有节点；
+- v1 的 `Server` 中间件在 Xboard 中已标注 `@deprecated use ServerV2`，v2 是今后的主路径。
+
+注意事项：
+
+- **需要 V2bX 核心支持 `MachineID`**：即 [liusu2100-sys/V2bX PR #1](https://github.com/liusu2100-sys/V2bX/pull/1)（分支 `feat/xboard-machine-token`，提交 `b1e8646`），且已发布包含该改动的新版本。旧版核心会忽略 `MachineID`，仍走 v1 接口并把机器令牌当作通讯密钥，结果是对接失败（`Invalid token`）。
+- **`NodeID` 必须是节点的数字 ID**：v2 中间件只按 `id` 匹配，不支持节点 code。
+- 节点协议由面板决定；v2 接口不再校验 `node_type`，所以脚本会自行比对面板返回的 `protocol` 与本地 `NodeType`（`hysteria2` 对应面板 `hysteria`），不一致时提示"节点协议不符"。
+
+生成的节点配置（其余字段与全局通讯密钥模式完全相同）：
+
+```json
+{
+    "Core": "sing",
+    "ApiHost": "https://xboard.example.com",
+    "ApiKey": "机器令牌",
+    "MachineID": 7,
+    "NodeID": 1,
+    "NodeType": "vless",
+    ...
+}
+```
+
+`MachineID` 缺省或为 `0` 时就是原来的 v1 + 全局通讯密钥，已有配置无需任何修改。
+
 ---
 
 ## 2. 审计发现与处理结果
@@ -73,12 +120,15 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 - **实时对接校验**：向导每添加一个节点就请求 `UniProxy/config`，区分 *密钥错误 / 节点不存在或协议不符 / 404 地址错误 / CDN-WAF 拦截 / 网络或 TLS 错误*，并检查 Hysteria 版本是否与选择一致。
 - **按面板配置自动决策**：Reality（`tls=2`）与无 TLS（`tls=0`）节点自动跳过证书；证书域名默认取面板中的 `server_name`。
 - **`V2bX check`**（菜单 17）：随时检测 `config.json` 中所有节点的对接状态（需要 jq 或 python3）。
+- **机器令牌**：向导在填写面板地址后询问鉴权方式（默认全局通讯密钥，行为不变；可选机器令牌，额外填写机器 ID）。选择机器令牌时，节点配置写入 `"MachineID": <id>`，向导和 `V2bX check` 改为请求 `/api/v2/server/config`，并能区分机器令牌错误 / 机器已停用 / 节点未绑定到该机器或未启用。见 1.1 节。
 
 ---
 
 ## 3. 推荐方案（最安全且可落地）
 
 ### 3.1 Xboard 面板侧
+
+0. **优先使用机器令牌**（需要 V2bX 核心支持，见 1.1 节）：每台服务器在 Xboard 中建一台机器，把该服务器上的节点绑定上去并启用；节点上运行向导时鉴权方式选 `2. 机器令牌`，填写机器 ID 与令牌。下面关于通讯密钥的各条在机器令牌模式下同样适用于机器令牌（HTTPS、接口白名单、不写访问日志）；全局通讯密钥即使不再使用，也应保持为强随机值。
 
 1. **通讯密钥用强随机值**，并只在节点配置中出现：
 
@@ -117,6 +167,8 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
    3) `V2bX check` 确认对接正常。
    在第 1、2 步之间节点会短暂无法同步（已下发的用户连接不受影响）。
 
+   **使用机器令牌时**只需处理受影响的那台服务器：在 Xboard 中重置该机器的令牌（或先停用该机器），再在这台服务器上执行 `V2bX config` 把它所有节点的 `ApiKey` 改为新令牌，`V2bX check` 确认即可，其他服务器不受影响。
+
 ### 3.2 节点侧
 
 | 项目 | 推荐 |
@@ -131,8 +183,8 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 
 ### 3.3 部署流程
 
-1. Xboard：创建节点（记下节点 ID、协议、端口；Hysteria2 选 Hysteria + 版本 2），配置好通讯密钥、HTTPS 与接口白名单。
-2. 节点：`bash install.sh`，首次安装选 `y` 进入向导，按提示填写；向导会当场验证对接。
+1. Xboard：创建节点（记下节点**数字 ID**、协议、端口；Hysteria2 选 Hysteria + 版本 2），配置好通讯密钥、HTTPS 与接口白名单；使用机器令牌时再创建机器、把节点绑定到该机器并启用，记下机器 ID 与令牌。
+2. 节点：`bash install.sh`，首次安装选 `y` 进入向导，按提示填写（鉴权方式回车为全局通讯密钥，选 `2` 为机器令牌）；向导会当场验证对接。
 3. `V2bX open_ports` 放行节点端口，云厂商安全组同样放行。
 4. `V2bX check` 与 `V2bX log` 确认；1～2 分钟后面板显示节点在线。
 
@@ -142,8 +194,8 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 
 | 风险 | 说明 | 建议 |
 | --- | --- | --- |
-| 全局通讯密钥 | 一台节点被攻破即泄露整个面板的节点凭据 | **新版 Xboard 已提供"机器令牌"**：`/api/v2/server/*` + `machine_id` + 机器专属 token，只能访问绑定在该机器上的节点，可单独停用（`app/Http/Middleware/ServerV2.php`）。但 V2bX 核心目前只实现了 v1 + 全局密钥。建议在 [liusu2100-sys/V2bX](https://github.com/liusu2100-sys/V2bX) 的 `api/panel` 中增加 `MachineID` 配置项，存在时改走 v2 路径并附带 `machine_id`；脚本侧再在向导中增加"机器令牌"选项。这是对接 Xboard 最安全的最终形态 |
-| v1 接口已标记弃用 | Xboard 中 v1 的 `Server` 中间件已标注 `@deprecated use ServerV2` | 同上，迁移到 v2 后也能规避将来 v1 被移除 |
+| 全局通讯密钥 | 仍选择全局通讯密钥时，一台节点被攻破即泄露整个面板的节点凭据 | **改用机器令牌**（见 1.1 节）：向导中鉴权方式选 `2`，节点配置写入 `MachineID`，只能访问绑定在该机器上的节点，可单独停用 / 重置。前提是 V2bX 核心已合并 [liusu2100-sys/V2bX PR #1](https://github.com/liusu2100-sys/V2bX/pull/1) 并发布新版本；在此之前请继续使用全局通讯密钥 |
+| v1 接口已标记弃用 | Xboard 中 v1 的 `Server` 中间件已标注 `@deprecated use ServerV2` | 机器令牌模式已走 v2；全局通讯密钥模式仍走 v1，将来 v1 被移除前应迁移到机器令牌 |
 | 密钥在 URL 中 | 由 V2bX 核心决定（查询参数），会出现在面板反代日志中 | 面板侧 `access_log off`；核心改造时可改用请求头 |
 | 脚本跟随 `main` 分支 | `V2bX update_shell` 及安装入口没有签名校验，信任根是 GitHub 账号 | 开启 2FA、分支保护；可选：发布带 tag 的版本并用 minisign 签名 |
 | `.dgst` 与 zip 同在一个 Release | 只能防传输损坏 / 镜像篡改，不能防 Release 被替换 | 可在 CI 中用 cosign / minisign 对 zip 签名，脚本内置公钥校验 |
@@ -167,7 +219,7 @@ V2bX 通过 Xboard 的 **UniProxy** 接口工作，所有请求都带 `node_type
 
 | 测试 | 命令 | 覆盖 |
 | --- | --- | --- |
-| 向导 + 对接（离线，自带 Xboard 模拟服务端） | `docker run --rm -v "$PWD":/t:ro python:3.12-slim bash -c 'apt-get update -qq && apt-get install -y -qq curl jq >/dev/null; bash /t/tests/initconfig.sh /t/initconfig.sh'` | 30 项：地址校验、密钥错误 / 节点不存在识别、hysteria2 别名、多节点多内核、特殊字符转义、Reality 自动跳过证书、dns 凭据、权限、备份、`V2bX check` |
+| 向导 + 对接（离线，自带 Xboard 模拟服务端，含 v1 与 v2 路由） | `docker run --rm -v "$PWD":/t:ro python:3.12-slim bash -c 'apt-get update -qq && apt-get install -y -qq curl jq >/dev/null; bash /t/tests/initconfig.sh /t/initconfig.sh'` | 86 项：地址校验、密钥错误 / 节点不存在识别、hysteria2 别名、多节点多内核、特殊字符转义、Reality 自动跳过证书、dns 凭据、权限、备份、`V2bX check`；机器令牌：请求路径与参数（带 `machine_id`、不带 `node_type`）、401 令牌错误 / 403 机器停用 / 节点未绑定或未启用 / 协议不符的识别、生成的 `MachineID`、非法机器 ID 与节点 code 的拒绝、嵌套 `ApiConfig` 写法；全局通讯密钥模式不写 `MachineID` 且只请求 v1 |
 | bash 4.2（CentOS 7 同版本） | 同上，镜像换成 `bash:4.2`（`apk add curl jq python3`） | 同上 + 无 jq 时的 python3 回退 |
 | SHA-256 校验 | `bash tests/checksum.sh install.sh` | 4 项 |
 | 系统识别 | `bash tests/smoke.sh install.sh` | 见 README |

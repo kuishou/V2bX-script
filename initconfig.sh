@@ -110,7 +110,18 @@ secure_conf_dir() {
 #   所有节点共用)；node_id 为「节点管理」中的节点 ID；node_type 必须与节点协议一致。
 #   Xboard 中 Hysteria2 节点的类型是 hysteria（版本选 2），V2bX 里填 hysteria2，
 #   面板会把 hysteria2 视为 hysteria 的别名。
+#
+#   机器令牌模式（节点配置中 MachineID > 0）改用 Xboard 的 v2 接口：
+#     GET  {ApiHost}/api/v2/server/config?machine_id=&node_id=&token=
+#     GET  .../user   POST .../push   POST .../alive   GET .../alivelist
+#   token 为 Xboard「机器管理」中该机器的令牌，只能访问绑定在该机器上且启用的
+#   节点，可单独停用（app/Http/Middleware/ServerV2.php）。不带 node_type，
+#   node_id 只按数字 ID 匹配（不支持节点 code）。需要 V2bX 核心支持 MachineID。
 # ---------------------------------------------------------------------------
+
+# 机器令牌模式所需的 V2bX 核心改动（用于提示）
+MACHINE_TOKEN_CORE_PR="https://github.com/liusu2100-sys/V2bX/pull/1"
+MACHINE_TOKEN_CORE_REF="分支 feat/xboard-machine-token，提交 b1e8646"
 
 # 规范化并校验面板地址，结果写入全局变量 ApiHost
 # 返回 1 表示地址不可用
@@ -146,35 +157,59 @@ normalize_api_host() {
     ApiHost="${h}"
 }
 
-# 校验通讯密钥，结果写入全局变量 ApiKey
+# 校验通讯密钥 / 机器令牌，结果写入全局变量 ApiKey
+# usage: check_api_key KEY [machine]
 check_api_key() {
-    local k="$1"
+    local k="$1" mode="${2:-}" name="通讯密钥"
+    [[ "${mode}" == machine ]] && name="机器令牌"
     if ! is_printable "${k}" || [[ "${k}" == *[[:space:]]* ]]; then
-        echo -e "${red}通讯密钥不能为空，且不能包含空白或控制字符${plain}"
+        echo -e "${red}${name}不能为空，且不能包含空白或控制字符${plain}"
         return 1
     fi
-    if [[ ${#k} -lt 16 ]]; then
+    if [[ "${mode}" == machine ]]; then
+        if [[ ${#k} -lt 16 ]]; then
+            echo -e "${yellow}提示：Xboard 生成的机器令牌为 32 位，当前只有 ${#k} 位，请确认是否填错${plain}"
+        fi
+    elif [[ ${#k} -lt 16 ]]; then
         echo -e "${yellow}提示：Xboard 要求通讯密钥至少 16 位，当前只有 ${#k} 位，请确认是否填错${plain}"
     fi
     ApiKey="${k}"
 }
 
-# 请求 Xboard UniProxy/config 接口。
-# 通讯密钥通过 curl 的 stdin 配置传入，不会出现在命令行（ps 可见）中。
-# usage: xboard_probe HOST KEY NODE_ID NODE_TYPE
+# 面板返回的协议是否与所选节点类型一致（hysteria2 / v2ray 为别名）
+# usage: protocol_matches PANEL_PROTOCOL NODE_TYPE
+protocol_matches() {
+    local p="$1" t="$2"
+    case "${t}" in
+        hysteria2) t="hysteria" ;;
+        v2ray) t="vmess" ;;
+    esac
+    [[ "${p}" == "${t}" ]]
+}
+
+# 请求 Xboard 节点配置接口：未给 MACHINE_ID 时为 v1 UniProxy/config（全局通讯
+# 密钥）；给出 MACHINE_ID 时为 v2 server/config（机器令牌，不带 node_type）。
+# 密钥通过 curl 的 stdin 配置传入，不会出现在命令行（ps 可见）中。
+# usage: xboard_probe HOST KEY NODE_ID NODE_TYPE [MACHINE_ID]
 # 输出：响应体保存在全局变量 probe_body，HTTP 状态码在 probe_code
 # 返回：0 成功；1 失败（已打印原因）
 xboard_probe() {
-    local host="$1" key="$2" id="$3" type="$4" tmp msg
+    local host="$1" key="$2" id="$3" type="$4" mid="${5:-}" tmp msg proto
     probe_body=""
     probe_code=""
     command -v curl >/dev/null 2>&1 || { echo -e "${yellow}未安装 curl，跳过面板连通性检测${plain}"; return 1; }
     tmp=$(mktemp) || return 1
     probe_code=$(
         {
-            printf 'url = "%s/api/v1/server/UniProxy/config"\n' "$(json_escape "${host}")"
-            printf 'get\n'
-            printf 'data-urlencode = "node_type=%s"\n' "$(json_escape "${type}")"
+            if [[ -n "${mid}" ]]; then
+                printf 'url = "%s/api/v2/server/config"\n' "$(json_escape "${host}")"
+                printf 'get\n'
+                printf 'data-urlencode = "machine_id=%s"\n' "$(json_escape "${mid}")"
+            else
+                printf 'url = "%s/api/v1/server/UniProxy/config"\n' "$(json_escape "${host}")"
+                printf 'get\n'
+                printf 'data-urlencode = "node_type=%s"\n' "$(json_escape "${type}")"
+            fi
             printf 'data-urlencode = "node_id=%s"\n' "$(json_escape "${id}")"
             printf 'data-urlencode = "token=%s"\n' "$(json_escape "${key}")"
         } | curl -sS --proto '=https,http' --max-time 15 -H 'Accept: application/json' \
@@ -189,6 +224,14 @@ xboard_probe() {
                 echo -e "${red}面板返回 200 但不是节点配置，ApiHost 可能指向了错误的站点（或被 CDN/WAF 拦截返回了网页）${plain}"
                 return 1
             fi
+            # v2 接口不带 node_type，面板不会校验协议，这里自行比对
+            if [[ -n "${mid}" ]]; then
+                proto=$(probe_field_str protocol)
+                if [[ -n "${proto}" ]] && ! protocol_matches "${proto}" "${type}"; then
+                    echo -e "${red}节点协议不符：面板中节点 ${id} 的协议是 ${proto}，与所选类型 ${type} 不一致（Hysteria2 在 Xboard 中为 Hysteria 节点、版本选 2）${plain}"
+                    return 1
+                fi
+            fi
             return 0
             ;;
         000|"")
@@ -199,6 +242,12 @@ xboard_probe() {
 
     msg=$(printf '%s' "${probe_body}" | grep -o '"message" *: *"[^"]*"' | head -n 1 | sed -E 's/.*: *"(.*)"/\1/')
     case "${probe_body}" in
+        *"Machine not found or invalid token"*)
+            echo -e "${red}机器 ID 或机器令牌错误：请核对 Xboard「机器管理」中机器 ${mid} 的 ID 与令牌（重置令牌后旧令牌立即失效）${plain}" ;;
+        *"Machine is disabled"*)
+            echo -e "${red}机器 ${mid} 已在 Xboard 中停用：请在「机器管理」中启用后重试${plain}" ;;
+        *"Node not found on this machine"*)
+            echo -e "${red}节点不在该机器上：请确认节点 ID ${id} 存在、已绑定到机器 ${mid} 且已启用（NodeID 必须是节点数字 ID，不支持节点 code）${plain}" ;;
         *"Invalid token"*)
             echo -e "${red}通讯密钥错误：与 Xboard「系统配置 → 服务端 → 通讯密钥」不一致${plain}" ;;
         *"Server does not exist"*)
@@ -207,7 +256,13 @@ xboard_probe() {
             echo -e "${red}面板不支持节点类型 ${type}${plain}" ;;
         *)
             case "${probe_code}" in
-                404) echo -e "${red}接口不存在 (404)：请确认 ApiHost 填写的是 Xboard 站点根地址，不要带 /admin 等路径${plain}" ;;
+                404)
+                    if [[ -n "${mid}" ]]; then
+                        echo -e "${red}接口不存在 (404)：Xboard 版本过旧、不支持机器令牌（/api/v2/server），或 ApiHost 不是 Xboard 站点根地址${plain}"
+                    else
+                        echo -e "${red}接口不存在 (404)：请确认 ApiHost 填写的是 Xboard 站点根地址，不要带 /admin 等路径${plain}"
+                    fi
+                    ;;
                 403|503) echo -e "${red}请求被拒绝 (${probe_code})：可能被 Cloudflare/WAF 拦截，请为节点 IP 放行或让 ApiHost 直连源站${plain}" ;;
                 5*) echo -e "${red}面板服务器错误 (${probe_code})：请检查 Xboard 日志${plain}" ;;
                 *) echo -e "${red}面板返回 HTTP ${probe_code}${msg:+：${msg}}${plain}" ;;
@@ -223,19 +278,20 @@ probe_field_str() { printf '%s' "${probe_body}" | grep -o "\"$1\" *: *\"[^\"]*\"
 
 # 检测 config.json 中所有节点能否从 Xboard 拉取配置
 xboard_check_config() {
-    local cfg="${CONF_DIR}/config.json" rows line host key id type n=0 bad=0
+    local cfg="${CONF_DIR}/config.json" rows line host key id type mid n=0 bad=0
     if [[ ! -f "${cfg}" ]]; then
         echo -e "${red}未找到 ${cfg}${plain}"
         return 1
     fi
     if command -v jq >/dev/null 2>&1; then
-        rows=$(jq -r '.Nodes[] | (.ApiConfig // .) as $a | [$a.ApiHost, $a.ApiKey, ($a.NodeID|tostring), $a.NodeType] | map(. // "" | tostring) | join("\u001f")' "${cfg}" 2>/dev/null)
+        rows=$(jq -r '.Nodes[] | (.ApiConfig // .) as $a | [$a.ApiHost, $a.ApiKey, ($a.NodeID|tostring), $a.NodeType, ($a.MachineID // 0)] | map(. // "" | tostring) | join("\u001f")' "${cfg}" 2>/dev/null)
     elif command -v python3 >/dev/null 2>&1; then
         rows=$(python3 - "${cfg}" <<'PY' 2>/dev/null
 import json, sys
 for n in json.load(open(sys.argv[1])).get("Nodes", []):
     a = n.get("ApiConfig") or n
-    print("\x1f".join(str(a.get(k, "")) for k in ("ApiHost", "ApiKey", "NodeID", "NodeType")))
+    row = [str(a.get(k, "")) for k in ("ApiHost", "ApiKey", "NodeID", "NodeType")]
+    print("\x1f".join(row + [str(a.get("MachineID") or 0)]))
 PY
 )
     else
@@ -247,15 +303,31 @@ PY
         return 1
     fi
     # 字段用 \x1f 分隔（@tsv 会转义反斜杠，导致含 \ 的密钥被改写）
-    while IFS=$'\x1f' read -r host key id type; do
+    while IFS=$'\x1f' read -r host key id type mid; do
         [[ -z "${host}" ]] && continue
         n=$((n + 1))
         host="${host%/}"
-        echo -e "节点 ${n}: ${host}  ID=${id}  类型=${type}"
-        if [[ "${host}" == http://* ]]; then
-            echo -e "  ${yellow}警告：面板地址为 http://，通讯密钥明文传输${plain}"
+        # MachineID 为 0 或缺省时使用 v1 + 全局通讯密钥
+        [[ "${mid}" == 0 ]] && mid=""
+        echo -e "节点 ${n}: ${host}  ID=${id}  类型=${type}${mid:+  机器=${mid}（机器令牌）}"
+        if [[ -n "${mid}" && ! "${mid}" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "  ${red}MachineID 必须是正整数（当前为 ${mid}）${plain}"
+            bad=$((bad + 1))
+            continue
         fi
-        if xboard_probe "${host}" "${key}" "${id}" "${type}"; then
+        if [[ -n "${mid}" && ! "${id}" =~ ^[1-9][0-9]*$ ]]; then
+            echo -e "  ${red}机器令牌模式下 NodeID 必须是节点数字 ID，不支持节点 code（当前为 ${id}）${plain}"
+            bad=$((bad + 1))
+            continue
+        fi
+        if [[ "${host}" == http://* ]]; then
+            if [[ -n "${mid}" ]]; then
+                echo -e "  ${yellow}警告：面板地址为 http://，机器令牌明文传输${plain}"
+            else
+                echo -e "  ${yellow}警告：面板地址为 http://，通讯密钥明文传输${plain}"
+            fi
+        fi
+        if xboard_probe "${host}" "${key}" "${id}" "${type}" "${mid}"; then
             echo -e "  ${green}对接正常${plain}，面板端口 $(probe_field_num server_port)"
             if [[ "${type}" == "hysteria2" && "$(probe_field_num version)" == "1" ]]; then
                 echo -e "  ${yellow}面板中该节点是 Hysteria 版本 1，与 hysteria2 不一致${plain}"
@@ -279,13 +351,41 @@ ask_yn() {
     [[ "${ans}" == [Yy] || "${ans}" == [Yy][Ee][Ss] ]]
 }
 
-# 询问面板地址与通讯密钥（循环直到合法）
+# 询问面板地址、鉴权方式与密钥（循环直到合法）
+# 结果写入 ApiHost / ApiKey / MachineID（全局通讯密钥模式下 MachineID 为空）
 ask_api_info() {
-    local h k
+    local h k sel
     while true; do
         read -rp "请输入 Xboard 面板地址 (https://xboard.example.com)：" h
         normalize_api_host "${h}" && break
     done
+    echo -e "${yellow}请选择节点鉴权方式：${plain}"
+    echo -e "${green}1. 全局通讯密钥（默认，所有节点共用 Xboard「系统配置 → 服务端 → 通讯密钥」）${plain}"
+    echo -e "${green}2. 机器令牌（Xboard「机器管理」中的机器 ID + 令牌，只能访问绑定在该机器上的节点，可单独停用，更安全）${plain}"
+    while true; do
+        read -rp "请输入 [1-2，默认 1]：" sel
+        case "${sel}" in
+            ""|1) MachineID=""; break ;;
+            2) break ;;
+            *) echo "无效的选择，请输入 1 或 2" ;;
+        esac
+    done
+    if [[ "${sel}" == 2 ]]; then
+        echo -e "${yellow}注意：机器令牌模式需要 V2bX 核心支持 MachineID 配置（${MACHINE_TOKEN_CORE_PR}，${MACHINE_TOKEN_CORE_REF}），且已发布包含该改动的新版本；${plain}"
+        echo -e "${yellow}      旧版核心会忽略 MachineID，仍走 v1 接口并把机器令牌当作通讯密钥，导致对接失败。${plain}"
+        echo -e "${yellow}      节点必须已在 Xboard 中绑定到该机器并启用，NodeID 必须是节点数字 ID（不支持节点 code）。${plain}"
+        while true; do
+            read -rp "请输入 Xboard 机器 ID（MachineID）：" MachineID
+            [[ "${MachineID}" =~ ^[1-9][0-9]{0,8}$ ]] && break
+            echo "错误：机器 ID 必须是正整数"
+        done
+        while true; do
+            read -rsp "请输入机器令牌（Xboard 机器管理 → 该机器的令牌，输入不回显）：" k
+            echo
+            check_api_key "${k}" machine && break
+        done
+        return 0
+    fi
     while true; do
         read -rsp "请输入通讯密钥（Xboard 系统配置 → 服务端 → 通讯密钥，输入不回显）：" k
         echo
@@ -378,7 +478,7 @@ add_node_config() {
     done
 
     while true; do
-        read -rp "请输入 Xboard 节点 ID：" NodeID
+        read -rp "请输入 Xboard 节点 ID${MachineID:+（数字 ID，需已绑定到机器 ${MachineID}）}：" NodeID
         [[ "${NodeID}" =~ ^[1-9][0-9]{0,8}$ ]] && break
         echo "错误：节点 ID 必须是正整数"
     done
@@ -420,8 +520,8 @@ add_node_config() {
     # 从面板拉取节点配置，用于验证对接参数并推断 TLS 需求
     tls_val=""
     default_domain=""
-    echo -e "正在检测 Xboard 对接（${ApiHost}，节点 ${NodeID}，${NodeType}）..."
-    if xboard_probe "${ApiHost}" "${ApiKey}" "${NodeID}" "${NodeType}"; then
+    echo -e "正在检测 Xboard 对接（${ApiHost}，${MachineID:+机器 ${MachineID}，}节点 ${NodeID}，${NodeType}）..."
+    if xboard_probe "${ApiHost}" "${ApiKey}" "${NodeID}" "${NodeType}" "${MachineID}"; then
         echo -e "${green}对接成功${plain}：面板端口 $(probe_field_num server_port)"
         tls_val=$(probe_field_num tls)
         default_domain=$(probe_field_str server_name)
@@ -468,7 +568,8 @@ add_node_config() {
     node_json="{
             \"Core\": \"${core}\",
             \"ApiHost\": \"$(json_escape "${ApiHost}")\",
-            \"ApiKey\": \"$(json_escape "${ApiKey}")\",
+            \"ApiKey\": \"$(json_escape "${ApiKey}")\",${MachineID:+
+            \"MachineID\": ${MachineID},}
             \"NodeID\": ${NodeID},
             \"NodeType\": \"${NodeType}\",
             \"Timeout\": 30,"
@@ -804,9 +905,14 @@ generate_config_file() {
     core_sing=false
     core_hysteria2=false
 
+    MachineID=""
     ask_api_info
     local fixed_api=y
-    ask_yn "后续节点是否使用相同的面板地址和通讯密钥?" y || fixed_api=n
+    if [[ -n "${MachineID}" ]]; then
+        ask_yn "后续节点是否使用相同的面板地址和机器令牌（同一台机器上的节点）?" y || fixed_api=n
+    else
+        ask_yn "后续节点是否使用相同的面板地址和通讯密钥?" y || fixed_api=n
+    fi
 
     while true; do
         add_node_config || echo -e "${yellow}已跳过该节点${plain}"
