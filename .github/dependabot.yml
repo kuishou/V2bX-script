@@ -1,0 +1,7 @@
+# 每月检查 GitHub Actions 新版本并提 PR（会保持「完整 commit SHA + 版本注释」写法）
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,0 +1,101 @@
+# 脚本改动的自动检查（对应 docs/MAINTAIN.md 第 6 节的检查清单）。
+# 发行版矩阵用 docker run 在宿主机上跑：centos:7 / ubuntu:16.04 的 glibc
+# 太旧，容器内无法运行 actions/checkout 依赖的 Node。
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: 语法检查
+        run: bash -n install.sh V2bX.sh initconfig.sh tests/*.sh
+      - name: shellcheck
+        run: shellcheck -S warning install.sh V2bX.sh initconfig.sh tests/*.sh
+      - name: 不允许新增跳过 TLS 校验的下载
+        run: |
+          # 只允许 V2BX_INSECURE=1 分支里的那几处（且使用统一的网络参数）
+          if grep -nE 'no-check-certificate|curl -k|bash <\(curl' install.sh V2bX.sh initconfig.sh \
+              | grep -vE ':[0-9]+:\s*#' \
+              | grep -vE 'curl -kfLs "\$\{CURL_NET_OPTS\[@\]\}"|wget --no-check-certificate "\$\{WGET_NET_OPTS\[@\]\}"'; then
+            echo "::error::发现新的跳过证书校验 / 管道执行远程脚本的代码"; exit 1
+          fi
+      - name: 不允许引用上游仓库地址
+        run: |
+          if grep -n wyx2685 install.sh V2bX.sh initconfig.sh | grep -vE ':[0-9]+:\s*#'; then
+            echo "::error::wyx2685 只允许出现在注释里（致谢）"; exit 1
+          fi
+
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: install.sh SHA-256 校验
+        run: bash tests/checksum.sh install.sh
+      - name: V2bX.sh 管理脚本
+        run: bash tests/v2bx.sh V2bX.sh
+      - name: initconfig.sh 配置向导（模拟 Xboard）
+        run: bash tests/initconfig.sh initconfig.sh
+
+  bash42:
+    # CentOS 7 自带 bash 4.2：脚本承诺兼容该版本
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: 全部离线测试（bash 4.2）
+        run: |
+          docker run --rm -v "$PWD":/t:ro -w /t bash:4.2 bash -c '
+            apk add -q curl jq python3 &&
+            bash --version | head -n 1 &&
+            bash tests/checksum.sh install.sh &&
+            bash tests/v2bx.sh V2bX.sh &&
+            bash tests/initconfig.sh initconfig.sh'
+
+  distro:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "centos:7",           release: centos, pkg: yum }
+          - { image: "rockylinux:9",       release: centos, pkg: dnf }
+          - { image: "almalinux:8",        release: centos, pkg: dnf }
+          - { image: "fedora:latest",      release: centos, pkg: dnf }
+          - { image: "ubuntu:16.04",       release: ubuntu, pkg: apt-get }
+          - { image: "ubuntu:24.04",       release: ubuntu, pkg: apt-get }
+          - { image: "debian:9",           release: debian, pkg: apt-get }
+          - { image: "debian:12",          release: debian, pkg: apt-get }
+          - { image: "alpine:3.20",        release: alpine, pkg: apk }
+          - { image: "archlinux:latest",   release: arch,   pkg: pacman }
+    name: distro (${{ matrix.image }})
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: 系统识别与 SHA-256 校验
+        env:
+          IMAGE: ${{ matrix.image }}
+          WANT_RELEASE: ${{ matrix.release }}
+          WANT_PKG: ${{ matrix.pkg }}
+        run: |
+          out=$(docker run --rm -v "$PWD":/t:ro "${IMAGE}" sh -c '
+            command -v bash >/dev/null 2>&1 || apk add -q bash
+            bash /t/tests/smoke.sh /t/install.sh && bash /t/tests/checksum.sh /t/install.sh')
+          echo "${out}"
+          echo "${out}" | grep -q "RESULT release=${WANT_RELEASE} " || { echo "::error::release 识别错误"; exit 1; }
+          echo "${out}" | grep -q " pkg_mgr=${WANT_PKG} " || { echo "::error::包管理器识别错误"; exit 1; }
+          ! echo "${out}" | grep -q '^FAIL'

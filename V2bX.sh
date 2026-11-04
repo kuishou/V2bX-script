@@ -38,8 +38,18 @@ green='\033[0;32m'
 yellow='\033[0;33m'
 plain='\033[0m'
 
+# 管理脚本自身的安装位置（测试时可指向临时文件）
+V2BX_BIN="${V2BX_BIN:-/usr/bin/V2bX}"
+V2BX_HOME="${V2BX_HOME:-/usr/local/V2bX}"
+
+# 仅供测试：V2BX_SOURCE_ONLY=1 source V2bX.sh 只加载函数，不检查 root、不显示菜单
+V2BX_SOURCE_ONLY="${V2BX_SOURCE_ONLY:-0}"
+
 # check root
-[[ $EUID -ne 0 ]] && echo -e "${red}错误: ${plain} 必须使用root用户运行此脚本！\n" && exit 1
+if [[ "${V2BX_SOURCE_ONLY}" != 1 && $EUID -ne 0 ]]; then
+    echo -e "${red}错误: ${plain} 必须使用root用户运行此脚本！\n"
+    exit 1
+fi
 
 # 管理脚本只需要知道 init 系统（OpenRC 或 systemd）；系统版本检查由 install.sh 负责。
 if [[ -d /run/systemd/system ]] || { command -v systemctl >/dev/null 2>&1 && [[ ! -f /etc/init.d/V2bX ]]; }; then
@@ -403,11 +413,12 @@ update_shell() {
         before_show_menu
         return 1
     fi
-    install -m 755 "${tmp}" /usr/bin/V2bX
+    # 本脚本定义了 install() 函数，必须用 command 调用系统的 install 命令
+    command install -m 755 "${tmp}" "${V2BX_BIN}"
     rm -f "${tmp}"
     # 配置向导随管理脚本一起更新（未安装 V2bX 时跳过，之后 generate 会按需下载）
-    if [[ -d /usr/local/V2bX ]]; then
-        rm -f /usr/local/V2bX/initconfig.sh
+    if [[ -d "${V2BX_HOME}" ]]; then
+        rm -f "${V2BX_HOME}/initconfig.sh"
         load_initconfig >/dev/null || echo -e "${yellow}配置向导更新失败，下次执行 V2bX generate / check 时会重新下载${plain}"
     fi
     echo -e "${green}升级脚本成功，请重新运行脚本${plain}" && exit 0
@@ -526,7 +537,7 @@ show_V2bX_version() {
 # 加载配置向导 / Xboard 检测函数（initconfig.sh 是生成逻辑的唯一来源）。
 # 优先使用安装时放到 /usr/local/V2bX 的版本，缺失时从脚本仓库下载。
 load_initconfig() {
-    local f=/usr/local/V2bX/initconfig.sh tmp
+    local f="${V2BX_HOME}/initconfig.sh" tmp
     if [[ ! -s "${f}" ]]; then
         tmp=$(mktemp /tmp/V2bX-initconfig.XXXXXX) || return 1
         if ! fetch_tls "${SCRIPT_URL_BASE}/initconfig.sh" "${tmp}" || [[ ! -s "${tmp}" ]]; then
@@ -534,8 +545,8 @@ load_initconfig() {
             echo -e "${red}下载配置向导失败：${SCRIPT_URL_BASE}/initconfig.sh${plain}"
             return 1
         fi
-        mkdir -p /usr/local/V2bX
-        install -m 644 "${tmp}" "${f}"
+        mkdir -p "${V2BX_HOME}"
+        command install -m 644 "${tmp}" "${f}"
         rm -f "${tmp}"
     fi
     # shellcheck source=/dev/null
@@ -711,6 +722,9 @@ show_menu() {
     esac
 }
 
+if [[ "${V2BX_SOURCE_ONLY}" == 1 ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 if [[ $# -gt 0 ]]; then
     case $1 in
