@@ -229,4 +229,59 @@ check "机器令牌检测：拒绝非数字 MachineID" 'grep -q "MachineID 必�
 check "机器令牌检测：拒绝节点 code" 'grep -q "不支持节点 code" "${cdir}/check.out"'
 check "机器令牌检测输出中不含令牌" '! grep -qF "${mtoken}" "${cdir}/check.out"'
 
+# --- 节点监听地址：有 IPv6 且双栈时监听 ::，否则 0.0.0.0 ---
+check "有 IPv6 + 双栈：监听 ::" '[[ "$(check_ipv6_support(){ echo 1; }; ipv6_dual_stack(){ return 0; }; node_listen_ip)" == "::" ]]'
+check "有 IPv6 + bindv6only=1：监听 0.0.0.0" '[[ "$(check_ipv6_support(){ echo 1; }; ipv6_dual_stack(){ return 1; }; node_listen_ip)" == 0.0.0.0 ]]'
+check "无 IPv6：监听 0.0.0.0" '[[ "$(check_ipv6_support(){ echo 0; }; ipv6_dual_stack(){ return 0; }; node_listen_ip)" == 0.0.0.0 ]]'
+
+# --- 向导：xray 监听 IPv6、通配符证书校验、重复节点 ---
+xdir="${V2BX_CONF_DIR}/xray-v6"
+mkdir -p "${xdir}"
+xanswers=(
+    y "http://127.0.0.1:${port}" "" "${token}" y
+    1 3 4                               # 节点1: xray / ID 3 / trojan (tls=1)
+    1 '*.example.com' '*abc' ""         # http 证书：通配符被拒、格式错误被拒、回车用面板域名
+    ""                                  # 邮箱留空
+    y
+    1 3 4                               # 节点2: 与节点1 重复 -> 跳过（不再请求面板）
+    y
+    2 1 2                               # 节点3: sing / ID 1 / vless (reality)
+    n n
+)
+: > "${XBOARD_MOCK_LOG}"
+# shellcheck disable=SC2034  # CONF_DIR 被 source 进来的函数使用
+( CONF_DIR="${xdir}"
+  check_ipv6_support() { echo 1; }
+  ipv6_dual_stack() { return 0; }
+  printf '%s\n' "${xanswers[@]}" | generate_config_file ) > "${xdir}/wizard.out" 2>&1
+# shellcheck disable=SC2034
+rc=$?
+# shellcheck disable=SC2034
+xcfg="${xdir}/config.json"
+check "xray/IPv6 向导返回成功" '[[ ${rc} -eq 0 ]]' || sed -n '1,200p' "${xdir}/wizard.out"
+check "重复节点被跳过，只生成 2 个节点" '[[ $(jq ".Nodes|length" "${xcfg}") -eq 2 ]] && grep -q "已经添加过" "${xdir}/wizard.out"'
+check "重复节点不再请求面板" '[[ $(grep -c "node_type=trojan&node_id=3&" "${XBOARD_MOCK_LOG}") -eq 1 ]]'
+check "有 IPv6 时 xray 节点监听 ::" '[[ "$(jq -r ".Nodes[]|select(.Core==\"xray\").ListenIP" "${xcfg}")" == "::" ]]'
+check "有 IPv6 时 sing 节点监听 ::" '[[ "$(jq -r ".Nodes[]|select(.Core==\"sing\").ListenIP" "${xcfg}")" == "::" ]]'
+check "http 模式拒绝通配符域名" '[[ $(grep -c "无法申请通配符证书" "${xdir}/wizard.out") -eq 1 ]]'
+check "通配符只能在最左侧（*abc 被拒）" '[[ $(grep -c "域名格式不正确" "${xdir}/wizard.out") -eq 1 ]]'
+check "回车使用面板下发的证书域名" '[[ "$(jq -r ".Nodes[0].CertConfig.CertDomain" "${xcfg}")" == tj.example.com ]]'
+
+# dns 模式允许通配符
+# shellcheck disable=SC2154  # certmode / certdomain 由 ask_cert_config 设置
+( ask_cert_config "" < <(printf '%s\n' 2 '*.example.com' "" cloudflare 'tok') >/dev/null 2>&1; echo "${certmode} ${certdomain}" ) > "${xdir}/cert.out"
+check "dns 模式允许通配符域名" '[[ "$(cat "${xdir}/cert.out")" == "dns *.example.com" ]]'
+
+# --- 备份：按名字排序保留最近 5 份，同一秒内不互相覆盖 ---
+bdir="${V2BX_CONF_DIR}/backup"
+mkdir -p "${bdir}"
+for i in 1 2 3 4 5 6 7; do
+    echo "v${i}" > "${bdir}/config.json"
+    backup_file "${bdir}/config.json"
+done
+# shellcheck disable=SC2012,SC2034  # newest 在 check 的 eval 字符串中使用
+newest=$(ls -1 "${bdir}"/config.json.bak.* | sort -r | head -n 1)
+check "备份只保留 5 份" '[[ $(ls -1 "${bdir}"/config.json.bak.* | wc -l) -eq 5 ]]'
+check "保留的是最近 5 次（v3..v7）且名字最大的是最新一次" '[[ "$(cat "${newest}")" == v7 ]] && [[ "$(cat "${bdir}"/config.json.bak.* | sort | tr "\n" " ")" == "v3 v4 v5 v6 v7 " ]]'
+
 exit ${fail}

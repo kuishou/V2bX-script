@@ -61,6 +61,20 @@ check_ipv6_support() {
     fi
 }
 
+# 监听 :: 时能否同时接收 IPv4（net.ipv6.bindv6only=0，Linux 默认）
+ipv6_dual_stack() {
+    [[ "$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null)" != "1" ]]
+}
+
+# 节点监听地址：有公网 IPv6 且为双栈时监听 ::（同时接收 IPv4/IPv6），否则 0.0.0.0
+node_listen_ip() {
+    if [[ "$(check_ipv6_support)" == "1" ]] && ipv6_dual_stack; then
+        echo "::"
+    else
+        echo "0.0.0.0"
+    fi
+}
+
 # 校验 JSON 文件；没有 jq / python3 时跳过（返回 0）
 json_validate() {
     local f="$1"
@@ -83,14 +97,21 @@ write_secure() {
     mv -f "${tmp}" "${dst}"
 }
 
-# 备份已有文件为 FILE.bak.<时间戳>，并只保留最近 5 份
+# 备份已有文件为 FILE.bak.<时间戳>.<序号>，并只保留最近 5 份。
+# 按文件名（时间戳+序号）而不是修改时间排序：cp -p 保留的是原文件的修改时间。
+# 序号取同一秒内已有备份的最大序号 + 1，保证新备份的名字总是最大，
+# 不会被随后的清理误删，也不会覆盖已有备份。
 backup_file() {
-    local f="$1" ts
+    local f="$1" base bak last seq=0
     [[ -f "${f}" ]] || return 0
-    ts=$(date +%Y%m%d%H%M%S)
-    cp -p "${f}" "${f}.bak.${ts}" && chmod 600 "${f}.bak.${ts}"
+    base="${f}.bak.$(date +%Y%m%d%H%M%S)"
+    for last in "${base}".[0-9][0-9][0-9]; do      # glob 结果按名字升序
+        [[ -e "${last}" ]] && seq=$((10#${last##*.}))
+    done
+    bak=$(printf '%s.%03d' "${base}" $((seq + 1)))
+    cp -p "${f}" "${bak}" && chmod 600 "${bak}"
     # shellcheck disable=SC2012  # 文件名由本脚本生成，不含特殊字符
-    ls -1t "${f}".bak.* 2>/dev/null | tail -n +6 | while read -r old; do rm -f "${old}"; done
+    ls -1 "${f}".bak.* 2>/dev/null | sort -r | tail -n +6 | while read -r old; do rm -f "${old}"; done
 }
 
 # 收紧配置目录权限：通讯密钥对 Xboard 所有节点通用，泄露即可拉取全部用户
@@ -418,8 +439,16 @@ ask_cert_config() {
     while true; do
         read -rp "请输入证书域名${def_domain:+ [默认 ${def_domain}]}：" certdomain
         [[ -z "${certdomain}" ]] && certdomain="${def_domain}"
-        [[ "${certdomain}" =~ ^[A-Za-z0-9*]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]] && break
-        echo -e "${red}域名格式不正确${plain}"
+        # 通配符只允许出现在最左侧，如 *.example.com
+        if [[ ! "${certdomain}" =~ ^(\*\.)?[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
+            echo -e "${red}域名格式不正确${plain}"
+            continue
+        fi
+        if [[ "${certdomain}" == \** && "${certmode}" == http ]]; then
+            echo -e "${red}http 模式（HTTP-01 验证）无法申请通配符证书，请填写具体域名，或重新运行向导改用 dns 模式${plain}"
+            continue
+        fi
+        break
     done
     case "${certmode}" in
         http|dns)
@@ -457,7 +486,7 @@ ask_cert_config() {
 }
 
 add_node_config() {
-    local sel default_domain tls_val need_cert node_json listen_ip sniff_tfo
+    local sel default_domain tls_val need_cert node_json listen_ip sniff_tfo node_key
     # 每个节点独立的变量，避免沿用上一个节点的回答
     local core NodeID NodeType
     certmode="none"; certdomain=""; certfile="${CONF_DIR}/fullchain.cer"; keyfile="${CONF_DIR}/cert.key"
@@ -517,6 +546,13 @@ add_node_config() {
         done
     fi
 
+    # 同一面板（同一机器）的同一节点只能添加一次，否则流量会被重复上报
+    node_key="${ApiHost}|${MachineID}|${NodeID}|${NodeType}"
+    if [[ -n "${seen_nodes["${node_key}"]:-}" ]]; then
+        echo -e "${yellow}节点 ${NodeID}（${NodeType}）已经添加过，不能重复添加${plain}"
+        return 1
+    fi
+
     # 从面板拉取节点配置，用于验证对接参数并推断 TLS 需求
     tls_val=""
     default_domain=""
@@ -561,8 +597,7 @@ add_node_config() {
     [[ "${need_cert}" == y ]] && ask_cert_config "${default_domain}"
     [[ -z "${certdomain}" ]] && certdomain="example.com"
 
-    listen_ip="0.0.0.0"
-    [[ "$(check_ipv6_support)" == "1" ]] && listen_ip="::"
+    listen_ip=$(node_listen_ip)
 
     # 公共字段（键名与 V2bX conf/node.go 中的 json tag 一致）
     node_json="{
@@ -576,7 +611,7 @@ add_node_config() {
     case "${core}" in
         xray)
             node_json+="
-            \"ListenIP\": \"0.0.0.0\",
+            \"ListenIP\": \"${listen_ip}\",
             \"SendIP\": \"0.0.0.0\",
             \"DeviceOnlineMinTraffic\": 200,
             \"ReportMinTraffic\": 0,
@@ -618,6 +653,7 @@ add_node_config() {
             }
         }"
     nodes_config+=("${node_json}")
+    seen_nodes["${node_key}"]=1
     # 只为实际生成了节点的内核写入 Cores（跳过的节点不能留下空跑的内核）
     case "${core}" in
         xray) core_xray=true ;;
@@ -907,6 +943,8 @@ generate_config_file() {
     fi
 
     nodes_config=()
+    # 已添加的节点（面板|机器|节点ID|协议），add_node_config 通过动态作用域使用
+    local -A seen_nodes=()
     core_xray=false
     core_sing=false
     core_hysteria2=false

@@ -15,7 +15,7 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: 语法检查
@@ -39,11 +39,13 @@ jobs:
   unit:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: install.sh SHA-256 校验
         run: bash tests/checksum.sh install.sh
+      - name: install.sh 辅助函数
+        run: bash tests/install_helpers.sh install.sh
       - name: V2bX.sh 管理脚本
         run: bash tests/v2bx.sh V2bX.sh
       - name: initconfig.sh 配置向导（模拟 Xboard）
@@ -53,7 +55,7 @@ jobs:
     # CentOS 7 自带 bash 4.2：脚本承诺兼容该版本
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: 全部离线测试（bash 4.2）
@@ -62,6 +64,7 @@ jobs:
             apk add -q curl jq python3 &&
             bash --version | head -n 1 &&
             bash tests/checksum.sh install.sh &&
+            bash tests/install_helpers.sh install.sh &&
             bash tests/v2bx.sh V2bX.sh &&
             bash tests/initconfig.sh initconfig.sh'
 
@@ -83,7 +86,7 @@ jobs:
           - { image: "archlinux:latest",   release: arch,   pkg: pacman }
     name: distro (${{ matrix.image }})
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - name: 系统识别与 SHA-256 校验

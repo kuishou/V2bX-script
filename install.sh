@@ -720,6 +720,17 @@ fetch_helper_scripts() {
     fi
 }
 
+# The new wizard could not be downloaded: keep the installed one, so that
+# `V2bX generate` / `V2bX check` still work offline after an update.
+# usage: keep_old_initconfig STAGE [OLD_DIR]
+keep_old_initconfig() {
+    local stage="$1" old="${2:-/usr/local/V2bX}"
+    if [[ ! -s "${stage}/initconfig.sh" && -s "${old}/initconfig.sh" ]]; then
+        cp -p "${old}/initconfig.sh" "${stage}/initconfig.sh"
+        warn "配置向导下载失败，沿用已安装的旧版本：${old}/initconfig.sh"
+    fi
+}
+
 print_usage() {
     echo -e ""
     echo "V2bX 管理脚本使用方法 (兼容使用V2bX执行，大小写不敏感): "
@@ -780,6 +791,7 @@ install_V2bX() {
     rm -f "${stage}/V2bX-linux.zip"
     chmod 755 "${stage}" "${stage}/V2bX"
     fetch_helper_scripts "${stage}"
+    keep_old_initconfig "${stage}"
 
     # 2) swap the installation in.
     rm -rf /usr/local/V2bX.old

@@ -26,6 +26,7 @@ docs/MAINTAIN.md  本文件（给维护者看）
 tests/smoke.sh    冒烟测试（只加载函数，测试系统识别等，不真正安装）
 tests/checksum.sh 离线测试 SHA-256 校验（正确 / 篡改 / 两种 .dgst 格式）
 tests/initconfig.sh + tests/xboard_mock.py  向导与 Xboard 对接的离线端到端测试
+tests/install_helpers.sh  install.sh 辅助函数的离线测试（更新时保留旧向导、版本号校验）
 tests/v2bx.sh     管理脚本的离线测试（V2BX_SOURCE_ONLY=1 只加载函数：放行端口、update_shell、load_initconfig）
 .github/workflows/test.yml  每次 push / PR 自动运行下面第 6 节的检查（含 bash 4.2 与 10 个发行版镜像）
 .github/dependabot.yml      每月提 PR 升级 GitHub Actions（保持完整 SHA 固定）
@@ -237,6 +238,7 @@ uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 bash -n install.sh V2bX.sh initconfig.sh
 shellcheck -S warning install.sh V2bX.sh initconfig.sh tests/*.sh
 bash tests/v2bx.sh V2bX.sh
+bash tests/install_helpers.sh install.sh
 grep -n 'wyx2685' install.sh V2bX.sh initconfig.sh   # 只允许出现在注释里（致谢）
 docker run --rm -v "$PWD":/t:ro debian:12 bash /t/tests/smoke.sh /t/install.sh
 docker run --rm -v "$PWD":/t:ro debian:12 bash /t/tests/checksum.sh /t/install.sh
