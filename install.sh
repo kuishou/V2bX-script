@@ -428,8 +428,7 @@ check_status() {
         temp=$(service_status_cmd 2>/dev/null | awk '{print $3}')
         [[ "${temp}" == "started" ]] && return 0 || return 1
     else
-        temp=$(systemctl status V2bX | grep Active | awk '{print $3}' | cut -d "(" -f2 | cut -d ")" -f1)
-        [[ "${temp}" == "running" ]] && return 0 || return 1
+        systemctl is-active --quiet V2bX
     fi
 }
 
@@ -441,6 +440,10 @@ check_status() {
 # (the zip is still checked against its SHA-256 below in that case).
 # ---------------------------------------------------------------------------
 V2BX_INSECURE="${V2BX_INSECURE:-0}"
+# Fail fast on unreachable hosts instead of hanging, and ride out transient
+# network errors (GitHub / raw.githubusercontent.com hiccups).
+CURL_NET_OPTS=(--connect-timeout 15 --retry 2 --retry-delay 2)
+WGET_NET_OPTS=(--timeout=30 --tries=3)
 
 tls_fail_hint() {
     err "TLS 证书校验失败：$1"
@@ -457,11 +460,11 @@ tls_fail_hint() {
 wget_tls() {
     local out="$1" url="$2" rc
     shift 2
-    wget -N --progress=bar "$@" -O "${out}" "${url}"
+    wget "${WGET_NET_OPTS[@]}" --progress=bar "$@" -O "${out}" "${url}"
     rc=$?
     if [[ ${rc} -eq 5 ]] && tls_fail_hint "${url}"; then
         warn "V2BX_INSECURE=1：跳过证书校验重试一次：${url}"
-        wget --no-check-certificate -N --progress=bar "$@" -O "${out}" "${url}"
+        wget --no-check-certificate "${WGET_NET_OPTS[@]}" --progress=bar "$@" -O "${out}" "${url}"
         rc=$?
     fi
     return ${rc}
@@ -472,13 +475,13 @@ wget_tls() {
 # usage: curl_tls OUTPUT URL
 curl_tls() {
     local out="$1" url="$2" rc
-    curl -fLs -o "${out}" "${url}"
+    curl -fLs "${CURL_NET_OPTS[@]}" -o "${out}" "${url}"
     rc=$?
     case "${rc}" in
         35|51|58|60|77|83)
             if tls_fail_hint "${url}"; then
                 warn "V2BX_INSECURE=1：跳过证书校验重试一次：${url}"
-                curl -kfLs -o "${out}" "${url}"
+                curl -kfLs "${CURL_NET_OPTS[@]}" -o "${out}" "${url}"
                 rc=$?
             fi
             ;;
@@ -488,12 +491,12 @@ curl_tls() {
 
 get_latest_version() {
     local json rc
-    json=$(curl -fLs "${RELEASE_API}")
+    json=$(curl -fLs "${CURL_NET_OPTS[@]}" "${RELEASE_API}")
     rc=$?
     case "${rc}" in
         35|51|58|60|77|83)
             if tls_fail_hint "${RELEASE_API}" >&2; then
-                json=$(curl -kfLs "${RELEASE_API}")
+                json=$(curl -kfLs "${CURL_NET_OPTS[@]}" "${RELEASE_API}")
             fi
             ;;
     esac
@@ -717,6 +720,17 @@ fetch_helper_scripts() {
     fi
 }
 
+# The new wizard could not be downloaded: keep the installed one, so that
+# `V2bX generate` / `V2bX check` still work offline after an update.
+# usage: keep_old_initconfig STAGE [OLD_DIR]
+keep_old_initconfig() {
+    local stage="$1" old="${2:-/usr/local/V2bX}"
+    if [[ ! -s "${stage}/initconfig.sh" && -s "${old}/initconfig.sh" ]]; then
+        cp -p "${old}/initconfig.sh" "${stage}/initconfig.sh"
+        warn "配置向导下载失败，沿用已安装的旧版本：${old}/initconfig.sh"
+    fi
+}
+
 print_usage() {
     echo -e ""
     echo "V2bX 管理脚本使用方法 (兼容使用V2bX执行，大小写不敏感): "
@@ -777,6 +791,7 @@ install_V2bX() {
     rm -f "${stage}/V2bX-linux.zip"
     chmod 755 "${stage}" "${stage}/V2bX"
     fetch_helper_scripts "${stage}"
+    keep_old_initconfig "${stage}"
 
     # 2) swap the installation in.
     rm -rf /usr/local/V2bX.old
