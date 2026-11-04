@@ -236,16 +236,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 
 | 步骤 | 提示文字 | 怎么填 |
 | --- | --- | --- |
-| 1 | `确定继续? [Y/n]` | 回车继续。旧配置会备份为 `config.json.bak.<时间>`（保留最近 5 份） |
+| 1 | `确定继续? [Y/n]` | 回车继续。旧配置会备份为 `config.json.bak.<时间>.<序号>`（保留最近 5 份） |
 | 2 | `请输入 Xboard 面板地址` | 面板根地址，如 `https://xboard.example.com`。**必须是 https://**（本机 `http://127.0.0.1` 除外），结尾的 `/` 会自动去掉 |
 | 3 | `请选择节点鉴权方式：1. 全局通讯密钥 2. 机器令牌` | 回车即 **1. 全局通讯密钥**（与以前完全相同）。**2. 机器令牌** 更安全，但需要 V2bX 核心支持，见下方说明 |
 | 4 | `请输入通讯密钥（输入不回显）` | Xboard「系统配置 → 服务端 → 通讯密钥」（≥16 位）。选机器令牌时改为先输入 **机器 ID**（正整数），再输入该机器的 **令牌**（不回显） |
 | 5 | `后续节点是否使用相同的面板地址和通讯密钥?` | 一般回车（是）。机器令牌模式下同一台服务器上的节点都属于同一台机器，也是回车 |
 | 6 | `请选择节点核心类型：1. xray 2. singbox 3. hysteria2` | Hysteria/TUIC/AnyTLS 只能用 **singbox**；选 **hysteria2** 内核时协议自动为 Hysteria2 |
-| 7 | `请输入 Xboard 节点 ID` | 面板「节点管理」中的节点 **数字 ID**（不支持节点 code） |
+| 7 | `请输入 Xboard 节点 ID` | 面板「节点管理」中的节点 **数字 ID**（不支持节点 code）。同一面板的同一节点（ID + 协议）只能添加一次，重复添加会被跳过 |
 | 8 | `请选择节点协议` | 必须与面板中节点协议一致。Xboard 的 Hysteria 节点：版本 1 选 Hysteria，版本 2 选 Hysteria2 |
 | 9 | `正在检测 Xboard 对接…` | 自动完成。失败时会说明原因（密钥错误 / 节点不存在或协议不符 / 机器令牌错误 / 机器已停用 / 节点未绑定到该机器 / 404 地址错误 / 被 CDN 拦截等），可选择仍然继续 |
-| 10 | `请选择证书模式` | 仅需要证书时出现（Trojan/VMess/VLESS 开启 TLS、Hysteria/TUIC/AnyTLS）；Reality 与 Shadowsocks 自动跳过。证书域名默认取面板中的 `server_name` |
+| 10 | `请选择证书模式` | 仅需要证书时出现（Trojan/VMess/VLESS 开启 TLS、Hysteria/TUIC/AnyTLS）；Reality 与 Shadowsocks 自动跳过。证书域名默认取面板中的 `server_name`；通配符域名（`*.example.com`）只能用 dns 模式 |
 | 11 | `是否继续添加节点?` | 一个 V2bX 可以同时对接多个节点 |
 | 12 | `是否额外启用原版域名审计列表?` | 默认否，见下方说明 |
 
@@ -258,7 +258,7 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 
 证书模式说明：
 
-- **1. http**：自动申请，要求域名已解析到本机且 **80 端口可用**。
+- **1. http**：自动申请，要求域名已解析到本机且 **80 端口可用**。不支持通配符域名（HTTP-01 验证的限制），需要 `*.example.com` 请选 dns。
 - **2. dns**（推荐）：通过 DNS 服务商 API 自动申请，向导会直接询问凭据。Cloudflare 请使用仅有 `Zone.DNS` 编辑权限的 **API Token**（`CF_DNS_API_TOKEN`），不要用 Global API Key；其它服务商按 [lego 文档](https://go-acme.github.io/lego/dns/) 输入变量名和值。
 - **3. file**：使用已有的证书文件（默认 `/etc/V2bX/fullchain.cer`、`/etc/V2bX/cert.key`）。
 - **4. self**：自动生成自签名证书，客户端需允许不安全证书，不推荐。
@@ -392,6 +392,8 @@ bash <(curl -Ls https://raw.githubusercontent.com/liusu2100-sys/V2bX-script/main
 ```
 
 > **注意**：`OriginalPath` 指向的 `/etc/V2bX/sing_origin.json` **只有运行过配置向导（`V2bX generate`）才会生成**，单纯安装不会创建。如果手动编写 sing 配置而文件不存在，V2bX 会报 `read original config error`。解决：运行一次 `V2bX generate`，或者删除 `OriginalPath` 这一行，或者自己创建该文件（格式见 [Singbox内核自定义配置说明](https://v2bx.v-50.me/v2bx/gong-neng-shuo-ming/singbox-nei-he-zi-ding-yi-pei-zhi-shuo-ming)）。安装时自带的示例 `config.json` 就是 sing 内核并引用了这个文件。
+
+监听地址：向导在检测到公网 IPv6（且 `net.ipv6.bindv6only=0`，Linux 默认）时为 xray / sing 节点写入 `"ListenIP": "::"`，同时接收 IPv4 与 IPv6 连接；没有 IPv6 时为 `"0.0.0.0"`。手动编辑时同理。
 
 多个节点：在 `Nodes` 数组里复制一份节点对象（用逗号分隔），改成另一个 `NodeID` / `NodeType` 即可；如果用到了不同内核，`Cores` 里也要加上对应内核。
 
